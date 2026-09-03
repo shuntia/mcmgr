@@ -3,6 +3,7 @@ package prompt
 import (
 	"bufio"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -142,5 +143,41 @@ func TestNoInputDisablesPrompting(t *testing.T) {
 	t.Setenv("MCMGR_NO_INPUT", "1")
 	if Interactive() {
 		t.Error("MCMGR_NO_INPUT must disable prompting even in accessible mode")
+	}
+}
+
+// TestIsTerminalRejectsDevNull is the whole point of asking the terminal
+// driver rather than checking the file mode: /dev/null and NUL are character
+// devices, so a mode check called them terminals and "mcmgr run < /dev/null"
+// took the interactive path and detached immediately.
+func TestIsTerminalRejectsDevNull(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+
+	if isTerminal(f) {
+		t.Errorf("%s must not count as a terminal", os.DevNull)
+	}
+
+	// A plain file is not one either, which is what a redirect or a pipe in a
+	// script looks like.
+	tmp, err := os.CreateTemp(t.TempDir(), "in-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tmp.Close()
+	if isTerminal(tmp) {
+		t.Error("a regular file must not count as a terminal")
+	}
+}
+
+// TestInteractiveRespectsNoInput covers the escape hatch scripts rely on.
+func TestInteractiveRespectsNoInput(t *testing.T) {
+	t.Setenv("MCMGR_ACCESSIBLE", "")
+	t.Setenv("MCMGR_NO_INPUT", "1")
+	if Interactive() {
+		t.Error("MCMGR_NO_INPUT must switch prompting off")
 	}
 }

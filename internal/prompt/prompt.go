@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/term"
 )
 
 // ErrAborted is returned when the user cancels a prompt with Ctrl-C or Esc.
@@ -59,9 +60,13 @@ func Interactive() bool {
 	return isTerminal(os.Stdin) && isTerminal(os.Stdout)
 }
 
+// isTerminal reports whether f is an interactive terminal.
+//
+// It asks the terminal driver rather than looking at the file mode, because a
+// char-device check counts /dev/null as a terminal: "mcmgr run < /dev/null" in
+// a terminal would then take the interactive path and detach immediately.
 func isTerminal(f *os.File) bool {
-	fi, err := f.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(f.Fd())
 }
 
 // theme is the plain theme; mcmgr does not decorate its prompts.
