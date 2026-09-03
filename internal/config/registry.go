@@ -52,16 +52,53 @@ func LoadRegistry() (*Registry, error) {
 	return reg, nil
 }
 
-// Save writes the registry back to disk.
+// Save writes the registry back to disk, replacing whatever is there.
+//
+// Prefer Add, Remove or SetDefault: those re-read the file under the lock, so
+// a change made by another mcmgr in the meantime survives. This one is for the
+// settings editor, which writes a registry the user has just seen whole.
 func (r *Registry) Save() error {
-	if _, err := paths.EnsureConfigDir(); err != nil {
-		return err
-	}
-	p, err := RegistryPath()
+	p, err := registryTarget()
 	if err != nil {
 		return err
 	}
-	return WriteJSON(p, r)
+	return WriteJSONLocked(p, r)
+}
+
+// update applies change to a freshly read registry while holding its lock, and
+// adopts the result as the receiver's own state.
+//
+// Re-reading matters because the caller's copy can be seconds old: two mcmgr
+// invocations that each loaded the registry, added a server and saved would
+// otherwise leave only the second one's server registered.
+func (r *Registry) update(change func(*Registry) error) error {
+	p, err := registryTarget()
+	if err != nil {
+		return err
+	}
+	return WithLock(p, func() error {
+		fresh, err := LoadRegistry()
+		if err != nil {
+			return err
+		}
+		if err := change(fresh); err != nil {
+			return err
+		}
+		if err := WriteJSON(p, fresh); err != nil {
+			return err
+		}
+		*r = *fresh
+		return nil
+	})
+}
+
+// registryTarget returns the registry path, creating its directory so the lock
+// file has somewhere to live.
+func registryTarget() (string, error) {
+	if _, err := paths.EnsureConfigDir(); err != nil {
+		return "", err
+	}
+	return RegistryPath()
 }
 
 // Add registers a server directory under name, becoming the default if it is
@@ -71,41 +108,54 @@ func (r *Registry) Add(name, dir string) error {
 	if err != nil {
 		return err
 	}
-	if existing, ok := r.Servers[name]; ok && existing != abs {
-		return fmt.Errorf("a different server named %q is already registered at %s", name, existing)
-	}
-	r.Servers[name] = abs
-	if r.Default == "" {
-		r.Default = name
-	}
-	return r.Save()
+	return r.update(func(reg *Registry) error {
+		if existing, ok := reg.Servers[name]; ok && existing != abs {
+			return fmt.Errorf("a different server named %q is already registered at %s", name, existing)
+		}
+		reg.Servers[name] = abs
+		if reg.Default == "" {
+			reg.Default = name
+		}
+		return nil
+	})
 }
 
 // Remove drops a server from the registry, clearing the default if needed. It
 // never touches the server's files.
 func (r *Registry) Remove(name string) error {
-	if _, ok := r.Servers[name]; !ok {
-		return fmt.Errorf("no server named %q is registered", name)
-	}
-	delete(r.Servers, name)
-	if r.Default == name {
-		r.Default = ""
-		for _, n := range r.Names() {
-			r.Default = n
-			break
+	return r.update(func(reg *Registry) error {
+		if _, ok := reg.Servers[name]; !ok {
+			return fmt.Errorf("no server named %q is registered", name)
 		}
-	}
-	return r.Save()
+		delete(reg.Servers, name)
+		reg.reseatDefault()
+		return nil
+	})
 }
 
 // SetDefault marks a registered server as the one used when no other selection
 // applies.
 func (r *Registry) SetDefault(name string) error {
-	if _, ok := r.Servers[name]; !ok {
-		return fmt.Errorf("no server named %q is registered", name)
+	return r.update(func(reg *Registry) error {
+		if _, ok := reg.Servers[name]; !ok {
+			return fmt.Errorf("no server named %q is registered", name)
+		}
+		reg.Default = name
+		return nil
+	})
+}
+
+// reseatDefault picks a new default when the current one is no longer
+// registered, so a registry never points at a server that is gone.
+func (r *Registry) reseatDefault() {
+	if _, ok := r.Servers[r.Default]; ok {
+		return
 	}
-	r.Default = name
-	return r.Save()
+	r.Default = ""
+	for _, n := range r.Names() {
+		r.Default = n
+		break
+	}
 }
 
 // Names returns registered server names in sorted order.
@@ -122,22 +172,20 @@ func (r *Registry) Names() []string {
 // reports the names removed.
 func (r *Registry) Prune() ([]string, error) {
 	var gone []string
-	for name, dir := range r.Servers {
-		if !Exists(dir) {
-			gone = append(gone, name)
-			delete(r.Servers, name)
+	err := r.update(func(reg *Registry) error {
+		gone = nil
+		for name, dir := range reg.Servers {
+			if !Exists(dir) {
+				gone = append(gone, name)
+				delete(reg.Servers, name)
+			}
 		}
+		reg.reseatDefault()
+		sort.Strings(gone)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if len(gone) == 0 {
-		return nil, nil
-	}
-	if _, ok := r.Servers[r.Default]; !ok {
-		r.Default = ""
-		for _, n := range r.Names() {
-			r.Default = n
-			break
-		}
-	}
-	sort.Strings(gone)
-	return gone, r.Save()
+	return gone, nil
 }

@@ -110,7 +110,7 @@ func (g *Global) Save() error {
 	if err := toml.NewEncoder(&buf).Encode(g); err != nil {
 		return err
 	}
-	if err := WriteFileAtomic(p, buf.Bytes()); err != nil {
+	if err := WriteFileLocked(p, buf.Bytes()); err != nil {
 		return err
 	}
 	return os.Chmod(p, 0o600)

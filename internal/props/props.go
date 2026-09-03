@@ -161,7 +161,7 @@ func (f *File) Save() error {
 		}
 		b.WriteByte('\n')
 	}
-	return config.WriteFileAtomic(f.path, []byte(b.String()))
+	return config.WriteFileLocked(f.path, []byte(b.String()))
 }
 
 // unescape decodes the subset of Java properties escapes Minecraft actually

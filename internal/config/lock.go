@@ -82,7 +82,7 @@ func (c *Config) SaveLock(l *Lock) error {
 		l.Mods = []LockedMod{}
 	}
 	sort.Slice(l.Mods, func(i, j int) bool { return l.Mods[i].ID < l.Mods[j].ID })
-	return WriteJSON(c.LockPath(), l)
+	return WriteJSONLocked(c.LockPath(), l)
 }
 
 // Find returns a pointer to the locked mod with the given id or name, or nil.

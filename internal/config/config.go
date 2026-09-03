@@ -335,7 +335,7 @@ func (c *Config) Save() error {
 	if err := enc.Encode(c); err != nil {
 		return fmt.Errorf("encoding %s: %w", ManifestName, err)
 	}
-	return WriteFileAtomic(c.Path(), buf.Bytes())
+	return WriteFileLocked(c.Path(), buf.Bytes())
 }
 
 // Init creates a manifest in dir. It fails if one already exists.
