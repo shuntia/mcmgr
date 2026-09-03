@@ -75,6 +75,10 @@ var manifestKeys = []Key{
 		Help: "Java feature release this Minecraft version needs"},
 	{Name: "server_args", Scope: Manifest, Kind: KindList, Help: "Arguments passed after the jar"},
 	{Name: "stop_timeout_secs", Scope: Manifest, Kind: KindInt, Help: "Seconds to wait for a clean shutdown"},
+	{Name: "restart_on_crash", Scope: Manifest, Kind: KindBool,
+		Help: "Start the server again when it exits unexpectedly"},
+	{Name: "restart_max_retries", Scope: Manifest, Kind: KindInt,
+		Help: "Consecutive crash restarts before giving up; -1 for no limit"},
 
 	// Defaults for command options, so the flags you always pass can be set
 	// once. Each is still overridable per command.
@@ -127,6 +131,9 @@ var aliases = map[string]string{
 	"curseforge":   "global.curseforge_key",
 	"cf_key":       "global.curseforge_key",
 	"stop_timeout": "stop_timeout_secs",
+	"restart":      "restart_on_crash",
+	"autorestart":  "restart_on_crash",
+	"auto_restart": "restart_on_crash",
 
 	// The [defaults] table is what people reach for most, so its keys answer
 	// to their bare names too.
@@ -345,6 +352,12 @@ func (s *Store) getManifest(name string) string {
 			return ""
 		}
 		return strconv.Itoa(c.StopTimeout)
+	case "restart_on_crash":
+		return strconv.FormatBool(c.RestartOnCrash)
+	case "restart_max_retries":
+		// Show the limit actually in force, not the empty value standing for
+		// it, since the whole point is knowing when mcmgr gives up.
+		return strconv.Itoa(c.RestartRetries())
 	case "defaults.provider":
 		return c.Defaults.Provider
 	case "defaults.allow_beta":
@@ -536,6 +549,18 @@ func (s *Store) setManifest(name, value string) error {
 			return err
 		}
 		c.StopTimeout = n
+	case "restart_on_crash":
+		return assignBool(value, &c.RestartOnCrash)
+	case "restart_max_retries":
+		if value == "" {
+			c.RestartMaxRetries = 0
+			return nil
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		c.RestartMaxRetries = n
 	case "defaults.provider":
 		c.Defaults.Provider = value
 	case "defaults.allow_beta":

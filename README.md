@@ -555,6 +555,7 @@ loader_version = "0.19.5"
 jar = "fabric-server-launch.jar"
 server_args = ["nogui"]
 stop_timeout_secs = 90
+restart_on_crash = false
 
 [java]
 args = ["-Xmx4G"]
@@ -620,6 +621,37 @@ Only a server that is still running `stop_timeout_secs` after being asked
 second Ctrl-C or signal escalates to that kill as well, for a server that is
 wedged. Under systemd, set `KillMode=mixed` or `KillMode=process` so that
 only the supervisor receives the stop signal.
+
+### Restarting after a crash
+
+Off by default, because a server that dies on startup should say so rather than
+loop. Turn it on and the supervisor brings the JVM back whenever it exits for a
+reason mcmgr did not ask for:
+
+```bash
+mcmgr config set restart-on-crash true
+mcmgr config set restart_max_retries 5     # default 3; -1 for no limit
+```
+
+```
+[mcmgr] server exited with code 1 after 3s; restarting in 5s (attempt 1)
+...
+[mcmgr] server crashed again after 3 restart(s); giving up
+       (raise restart_max_retries, or fix what is killing it)
+```
+
+Only an unexpected exit counts. `server stop`, `server kill`, Ctrl-C and a
+SIGTERM to the supervisor all mark it as stopping first, so a shutdown you asked
+for is never undone — including one that arrives while a restart is waiting out
+its backoff. An exit code of zero is the server doing as it was told, and is
+left alone too.
+
+Consecutive restarts back off, five seconds longer each time up to thirty, and
+are capped by `restart_max_retries` so a server that cannot start is not
+restarted forever. A run that lasts two minutes counts as healthy and earns the
+full allowance back, so a server that falls over after a week still gets its
+restarts. `mcmgr server status` shows the policy, and how many restarts the
+current run has already used.
 
 ## Environment variables
 

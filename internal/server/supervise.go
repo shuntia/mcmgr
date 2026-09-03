@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"mcmgr/internal/config"
+	"mcmgr/internal/ui"
 )
 
 // ringCapacity is how many console lines are kept for attach backlog.
@@ -115,12 +116,28 @@ func (h *hub) close() {
 // supervisor owns one JVM and the control listener in front of it.
 type supervisor struct {
 	cfg *config.Config
-	st  *State
-	hub *hub
+	// st is the published runtime state. ChildPID changes on a restart, so
+	// it is only touched under stMu.
+	st   *State
+	stMu sync.Mutex
+	hub  *hub
 
+	// cmd is replaced when a crashed server is restarted, so it is only read
+	// through process() and only written under cmdMu.
 	cmd     *exec.Cmd
+	cmdMu   sync.Mutex
 	stdin   io.WriteCloser
 	stdinMu sync.Mutex
+
+	// opts are kept so a restart runs the same command as the first start.
+	opts Options
+	// restarts counts consecutive crash restarts, reset once a run lasts
+	// long enough to look healthy. It is read by the control listener while
+	// the exit goroutine updates it.
+	restarts atomic.Int32
+	// stopWanted is closed the first time a stop is asked for, so a restart
+	// waiting out its backoff can abandon it.
+	stopWanted chan struct{}
 
 	logFile *os.File
 	logMu   sync.Mutex
@@ -158,7 +175,10 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 		return 1, fmt.Errorf("server %q is already running (pid %d)", cfg.Name, live.State.PID)
 	}
 
-	s := &supervisor{cfg: cfg, hub: newHub(), foreground: opts.Foreground, exited: make(chan struct{})}
+	s := &supervisor{
+		cfg: cfg, hub: newHub(), foreground: opts.Foreground, opts: opts,
+		exited: make(chan struct{}), stopWanted: make(chan struct{}),
+	}
 
 	if err := os.MkdirAll(cfg.StatePath(), 0o755); err != nil {
 		return 1, err
@@ -194,9 +214,12 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 	if err := s.start(opts.ExtraJavaArgs); err != nil {
 		return 1, err
 	}
-	s.st.ChildPID = s.cmd.Process.Pid
-	if err := s.st.Write(cfg.Dir()); err != nil {
-		_ = s.cmd.Process.Kill()
+	s.stMu.Lock()
+	s.st.ChildPID = s.process().Pid
+	err = s.st.Write(cfg.Dir())
+	s.stMu.Unlock()
+	if err != nil {
+		s.kill()
 		return 1, err
 	}
 	defer ClearState(cfg.Dir())
@@ -326,27 +349,35 @@ func Command(cfg *config.Config, extraJava []string) *exec.Cmd {
 
 // start launches the JVM and begins pumping its output into the hub.
 func (s *supervisor) start(extraJava []string) error {
-	s.cmd = Command(s.cfg, extraJava)
+	cmd := Command(s.cfg, extraJava)
 
-	stdin, err := s.cmd.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
 	}
-	stdout, err := s.cmd.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	stderr, err := s.cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return err
 	}
-	s.stdin = stdin
 
-	if err := s.cmd.Start(); err != nil {
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting %s: %w", s.cfg.JavaBin(), err)
 	}
 
-	s.emit(fmt.Sprintf("[mcmgr] started %s (pid %d) in %s", s.cfg.JavaBin(), s.cmd.Process.Pid, s.cfg.Dir()))
+	s.cmdMu.Lock()
+	s.cmd = cmd
+	s.cmdMu.Unlock()
+	s.stdinMu.Lock()
+	s.stdin = stdin
+	s.stdinMu.Unlock()
+	s.ready.Store(false)
+
+	started := time.Now()
+	s.emit(fmt.Sprintf("[mcmgr] started %s (pid %d) in %s", s.cfg.JavaBin(), cmd.Process.Pid, s.cfg.Dir()))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -356,7 +387,7 @@ func (s *supervisor) start(extraJava []string) error {
 	go func() {
 		// The pipes must be fully drained before Wait, which closes them.
 		wg.Wait()
-		err := s.cmd.Wait()
+		err := cmd.Wait()
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
@@ -364,11 +395,110 @@ func (s *supervisor) start(extraJava []string) error {
 			code = 1
 		}
 		s.exitCode.Store(int32(code))
+		if s.restartAfterCrash(code, time.Since(started)) {
+			// A replacement JVM is running; its own goroutine owns the exit
+			// from here on.
+			return
+		}
 		s.emit(fmt.Sprintf("[mcmgr] server exited with code %d", code))
 		close(s.exited)
 		s.hub.close()
 	}()
 	return nil
+}
+
+// process returns the JVM currently being supervised, which changes whenever a
+// crashed server is restarted.
+func (s *supervisor) process() *os.Process {
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+	if s.cmd == nil {
+		return nil
+	}
+	return s.cmd.Process
+}
+
+// kill terminates the JVM, if there is one. Between a crash and its restart
+// there is none, and there is nothing to kill.
+func (s *supervisor) kill() {
+	if p := s.process(); p != nil {
+		_ = p.Kill()
+	}
+}
+
+// healthyRun is how long a server has to stay up for its exit to count as a
+// fresh crash rather than part of a loop. A server that is broken at startup
+// dies well inside this; one that ran an evening and then fell over should get
+// its full allowance of restarts again.
+const healthyRun = 2 * time.Minute
+
+// restartBackoff spaces out restart attempts, growing with each consecutive
+// one so a server crash-looping against something external — a port, a
+// database — is not hammering it every second.
+func restartBackoff(attempt int) time.Duration {
+	d := time.Duration(attempt) * 5 * time.Second
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
+}
+
+// shouldRestart decides whether an exit earns a restart, and how long to hold
+// off before making it. It is the whole policy, kept apart from the machinery
+// of actually starting a JVM.
+//
+// Only an exit mcmgr did not ask for counts: a clean shutdown, `server stop`
+// and `server kill` all set stopping first, and a zero exit code is the server
+// doing as it was told.
+func (s *supervisor) shouldRestart(code int, ranFor time.Duration) (time.Duration, bool) {
+	if !s.cfg.RestartOnCrash || code == 0 || s.stopping.Load() {
+		return 0, false
+	}
+
+	// A run that lasted is not part of a loop, so it earns the full allowance
+	// back: a server that falls over after a week should still be restarted.
+	if ranFor >= healthyRun {
+		s.restarts.Store(0)
+	}
+	limit := s.cfg.RestartRetries()
+	if attempts := int(s.restarts.Load()); limit >= 0 && attempts >= limit {
+		s.emit(fmt.Sprintf("[mcmgr] server crashed again after %d restart(s); giving up "+
+			"(raise restart_max_retries, or fix what is killing it)", attempts))
+		return 0, false
+	}
+	return restartBackoff(int(s.restarts.Add(1))), true
+}
+
+// restartAfterCrash brings the server back after an unexpected exit, when the
+// policy says to, and reports whether a new JVM is running.
+func (s *supervisor) restartAfterCrash(code int, ranFor time.Duration) bool {
+	wait, ok := s.shouldRestart(code, ranFor)
+	if !ok {
+		return false
+	}
+
+	s.emit(fmt.Sprintf("[mcmgr] server exited with code %d after %s; restarting in %s (attempt %d)",
+		code, ui.Duration(ranFor), wait, s.restarts.Load()))
+	select {
+	case <-time.After(wait):
+	case <-s.stopWanted:
+		// A stop arrived while waiting: honour it instead of restarting.
+		s.emit("[mcmgr] stop requested while waiting to restart; not restarting")
+		return false
+	}
+
+	if err := s.start(s.opts.ExtraJavaArgs); err != nil {
+		s.emit(fmt.Sprintf("[mcmgr] could not restart the server: %v", err))
+		return false
+	}
+	s.stMu.Lock()
+	s.st.ChildPID = s.process().Pid
+	err := s.st.Write(s.cfg.Dir())
+	s.stMu.Unlock()
+	if err != nil {
+		s.emit(fmt.Sprintf("[mcmgr] restarted, but recording the new pid failed: %v", err))
+	}
+	return true
 }
 
 // readyMarker is the vanilla/Paper startup-complete line, e.g.
@@ -430,6 +560,9 @@ func (s *supervisor) requestStop(timeoutSecs int) {
 	if !s.stopping.CompareAndSwap(false, true) {
 		return
 	}
+	// Wakes a restart that is waiting out its backoff, so a stop is never
+	// followed by the server coming back.
+	close(s.stopWanted)
 	if timeoutSecs <= 0 {
 		timeoutSecs = s.cfg.StopTimeoutSecs()
 	}
@@ -439,16 +572,27 @@ func (s *supervisor) requestStop(timeoutSecs int) {
 			// If stdin is gone the console command cannot be delivered, so go
 			// straight to terminating the process.
 			s.emit("[mcmgr] console unavailable, terminating process")
-			_ = s.cmd.Process.Kill()
+			s.kill()
 			return
 		}
 		select {
 		case <-s.exited:
 		case <-time.After(time.Duration(timeoutSecs) * time.Second):
 			s.emit(fmt.Sprintf("[mcmgr] still running %ds after 'stop', terminating (raise stop_timeout_secs if saves take longer)", timeoutSecs))
-			_ = s.cmd.Process.Kill()
+			s.kill()
 		}
 	}()
+}
+
+// requestKill terminates the server immediately. Like requestStop it marks the
+// supervisor as stopping first, so a kill is never mistaken for a crash and
+// answered with a restart.
+func (s *supervisor) requestKill() {
+	if s.stopping.CompareAndSwap(false, true) {
+		close(s.stopWanted)
+	}
+	s.emit("[mcmgr] killing server process")
+	s.kill()
 }
 
 // wait blocks until the JVM exits and returns its code.
@@ -461,6 +605,8 @@ func (s *supervisor) wait() int {
 
 // status builds a snapshot for the status op.
 func (s *supervisor) status() *Status {
+	s.stMu.Lock()
+	defer s.stMu.Unlock()
 	return &Status{
 		Name:      s.cfg.Name,
 		Dir:       s.cfg.Dir(),
@@ -472,6 +618,7 @@ func (s *supervisor) status() *Status {
 		StartedAt: s.st.StartedAt,
 		Ready:     s.ready.Load(),
 		Stopping:  s.stopping.Load(),
+		Restarts:  int(s.restarts.Load()),
 	}
 }
 
@@ -553,9 +700,7 @@ func (s *supervisor) handle(conn net.Conn) {
 			_ = send(Response{Type: RespOK, Msg: "stopping"})
 
 		case OpKill:
-			s.stopping.Store(true)
-			s.emit("[mcmgr] killing server process")
-			_ = s.cmd.Process.Kill()
+			s.requestKill()
 			_ = send(Response{Type: RespOK, Msg: "killed"})
 
 		case OpAttach:
@@ -662,7 +807,7 @@ func (s *supervisor) installSignalHandler() func() {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "[mcmgr] second %s: terminating\n", sig)
-			_ = s.cmd.Process.Kill()
+			s.requestKill()
 			return
 		}
 	}()

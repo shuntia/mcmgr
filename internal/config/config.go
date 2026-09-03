@@ -175,6 +175,15 @@ type Config struct {
 
 	StopTimeout int `json:"stop_timeout_secs,omitempty" toml:"stop_timeout_secs,omitempty"`
 
+	// RestartOnCrash makes the supervisor start the server again when the JVM
+	// exits unexpectedly — a crash, an out-of-memory kill, anything that is
+	// not a stop mcmgr asked for. Off by default: a server that dies on
+	// startup should say so rather than loop.
+	RestartOnCrash bool `json:"restart_on_crash,omitempty" toml:"restart_on_crash,omitempty"`
+	// RestartMaxRetries bounds consecutive restarts, so a server that cannot
+	// start at all is not restarted forever. Negative means no limit.
+	RestartMaxRetries int `json:"restart_max_retries,omitempty" toml:"restart_max_retries,omitempty"`
+
 	Java Java `json:"java" toml:"java"`
 	// Defaults are the command options this server always wants, so they do
 	// not have to be typed on every invocation.
@@ -232,6 +241,21 @@ func (c *Config) StopTimeoutSecs() int {
 		return c.StopTimeout
 	}
 	return 90
+}
+
+// DefaultRestartRetries is how many times in a row a crashed server is
+// restarted before mcmgr gives up. A server that dies on startup fails the
+// same way every time, so a few attempts is enough to ride out a transient
+// crash without hiding a broken configuration.
+const DefaultRestartRetries = 3
+
+// RestartRetries is the consecutive-restart limit in force, with a negative
+// value meaning "keep restarting".
+func (c *Config) RestartRetries() int {
+	if c.RestartMaxRetries != 0 {
+		return c.RestartMaxRetries
+	}
+	return DefaultRestartRetries
 }
 
 // FindMod returns the index of a spec by id or name, or -1.

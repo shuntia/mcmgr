@@ -691,10 +691,21 @@ func serverStatusCmd() *Command {
 				len(lock.Mods), explicit, len(lock.Mods)-explicit)
 		}
 
+		if cfg.RestartOnCrash {
+			limit := "no limit"
+			if n := cfg.RestartRetries(); n >= 0 {
+				limit = fmt.Sprintf("up to %s in a row", plural(n, "restart"))
+			}
+			field("on crash", "restart (%s)", limit)
+		}
+
 		if live != nil {
 			field("pid", "%d (jvm %d)", live.State.PID, live.State.ChildPID)
 			field("uptime", "%s", ui.Duration(live.State.Uptime()))
 			field("port", "%d %s(mcmgr control)%s", live.State.Port, ui.Dim, ui.Reset)
+			if live.Status != nil && live.Status.Restarts > 0 {
+				field("restarts", "%s%d since it last stayed up%s", ui.Yellow, live.Status.Restarts, ui.Reset)
+			}
 		} else {
 			if !server.EULAAccepted(cfg.Dir()) {
 				field("eula", "%snot accepted - run 'mcmgr server accept-eula'%s", ui.Yellow, ui.Reset)

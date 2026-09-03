@@ -63,6 +63,9 @@ type Status struct {
 	Ready bool `json:"ready"`
 	// Stopping is true once a shutdown has been requested.
 	Stopping bool `json:"stopping"`
+	// Restarts counts how many times restart_on_crash has brought this
+	// server back since it last ran long enough to look healthy.
+	Restarts int `json:"restarts,omitempty"`
 }
 
 // Conn is a client connection to a supervisor.
