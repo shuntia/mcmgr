@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"strconv"
 	"strings"
@@ -123,12 +124,16 @@ func configSetCmd() *Command {
 			"mcmgr config set global.curseforge_key <key>",
 		},
 	}
+	var (
+		force *bool
+		yes   *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		force = fs.Bool("force", false, "apply even when the server is running or a warning is severe")
+		yes = fs.Bool("yes", false, "do not ask for confirmation on dangerous changes")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr config set")
-		var (
-			force = fs.Bool("force", false, "apply even when the server is running or a warning is severe")
-			yes   = fs.Bool("yes", false, "do not ask for confirmation on dangerous changes")
-		)
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err

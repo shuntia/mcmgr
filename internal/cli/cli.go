@@ -46,6 +46,11 @@ type Command struct {
 	// one, and in a flat list otherwise.
 	Group string
 	Sub   []*Command
+	// Flags registers this leaf's own options on a flag set. It is optional:
+	// a command may still declare its flags inline in Run. Declaring them
+	// here as well is what lets `mcmgr completion` list a command's flags
+	// without running it.
+	Flags func(*flag.FlagSet)
 	// Run executes a leaf command. Flags are registered inside it via
 	// newFlags, so no parsing happens for commands that are not invoked.
 	Run func(args []string) error
@@ -211,6 +216,12 @@ func newFlags(cmd *Command, path string) (*flag.FlagSet, *globals) {
 	fs.StringVar(&g.server, "s", "", "shorthand for --server")
 	fs.BoolVar(&g.quiet, "quiet", false, "suppress progress output")
 	fs.BoolVar(&g.quiet, "q", false, "shorthand for --quiet")
+
+	// The leaf's own flags, when it declares them separately from Run. A
+	// fresh flag set each time keeps this from redefining anything.
+	if cmd.Flags != nil {
+		cmd.Flags(fs)
+	}
 
 	fs.Usage = func() { printHelpWithFlags(cmd, path, fs) }
 	return fs, g

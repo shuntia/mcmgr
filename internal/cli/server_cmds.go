@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -349,11 +350,17 @@ func serverRunCmd() *Command {
 			"mcmgr server run --foreground     # for systemd, docker and the like",
 		},
 	}
+	var (
+		javaArgs   stringList
+		foreground *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		javaArgs = nil
+		fs.Var(&javaArgs, "java-arg", "extra JVM argument for this run; repeatable")
+		foreground = fs.Bool("foreground", false, "keep the supervisor in this process; Ctrl-D cannot detach")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server run")
-		var javaArgs stringList
-		fs.Var(&javaArgs, "java-arg", "extra JVM argument for this run; repeatable")
-		foreground := fs.Bool("foreground", false, "keep the supervisor in this process; Ctrl-D cannot detach")
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -420,11 +427,17 @@ func serverLaunchCmd() *Command {
 			"mcmgr server launch -s survival",
 		},
 	}
+	var (
+		javaArgs stringList
+		attach   *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		javaArgs = nil
+		fs.Var(&javaArgs, "java-arg", "extra JVM argument for this run; repeatable")
+		attach = fs.Bool("attach", false, "attach to the console once the server is up")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server launch")
-		var javaArgs stringList
-		fs.Var(&javaArgs, "java-arg", "extra JVM argument for this run; repeatable")
-		attach := fs.Bool("attach", false, "attach to the console once the server is up")
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -471,9 +484,12 @@ func serverAttachCmd() *Command {
 			"Ctrl-C or Ctrl-D detaches and leaves the server running. Use 'server run'\n" +
 			"for a console where Ctrl-C stops the server instead.",
 	}
+	var tail *int
+	cmd.Flags = func(fs *flag.FlagSet) {
+		tail = fs.Int("tail", 200, "lines of recent output to show first")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server attach")
-		tail := fs.Int("tail", 200, "lines of recent output to show first")
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -504,12 +520,16 @@ func serverStopCmd() *Command {
 		Long: "Send 'stop' to the server console so it saves and shuts down.\n" +
 			"If it has not exited after the grace period it is terminated.",
 	}
+	var (
+		timeout *int
+		noWait  *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		timeout = fs.Int("timeout", 0, "seconds to wait before terminating (default: from mcmgr.toml)")
+		noWait = fs.Bool("no-wait", false, "return immediately instead of waiting for shutdown")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server stop")
-		var (
-			timeout = fs.Int("timeout", 0, "seconds to wait before terminating (default: from mcmgr.json)")
-			noWait  = fs.Bool("no-wait", false, "return immediately instead of waiting for shutdown")
-		)
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -707,13 +727,18 @@ func serverLogsCmd() *Command {
 			"mcmgr server logs --follow",
 		},
 	}
+	var (
+		lines   *int
+		follow  *bool
+		followS *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		lines = fs.Int("n", 100, "number of lines to show; -1 for all")
+		follow = fs.Bool("follow", false, "keep printing new output until interrupted")
+		followS = fs.Bool("f", false, "shorthand for --follow")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server logs")
-		var (
-			lines   = fs.Int("n", 100, "number of lines to show; -1 for all")
-			follow  = fs.Bool("follow", false, "keep printing new output until interrupted")
-			followS = fs.Bool("f", false, "shorthand for --follow")
-		)
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}

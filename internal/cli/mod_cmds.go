@@ -85,15 +85,21 @@ func modAddCmd() *Command {
 			"mcmgr mod add sodium --version mc1.21.4-0.6.0",
 		},
 	}
+	var (
+		shared   modFlags
+		version  *string
+		noDeps   *bool
+		clientOK *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		shared = addSharedModFlags(fs, true)
+		version = fs.String("version", "", "install and pin this exact version instead of the newest")
+		noDeps = fs.Bool("no-deps", false, "do not install required dependencies")
+		clientOK = fs.Bool("allow-client-only", false,
+			"install even if the provider says the mod does not run on servers")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr mod add")
-		shared := addSharedModFlags(fs, true)
-		var (
-			version  = fs.String("version", "", "install and pin this exact version instead of the newest")
-			noDeps   = fs.Bool("no-deps", false, "do not install required dependencies")
-			clientOK = fs.Bool("allow-client-only", false,
-				"install even if the provider says the mod does not run on servers")
-		)
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err
@@ -139,10 +145,16 @@ func modRemoveCmd() *Command {
 			"mcmgr mod remove sodium lithium --keep-deps",
 		},
 	}
+	var (
+		shared   modFlags
+		keepDeps *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		shared = addSharedModFlags(fs, false)
+		keepDeps = fs.Bool("keep-deps", false, "leave dependencies installed even if nothing needs them")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr mod remove")
-		shared := addSharedModFlags(fs, false)
-		keepDeps := fs.Bool("keep-deps", false, "leave dependencies installed even if nothing needs them")
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err
@@ -170,12 +182,16 @@ func modListCmd() *Command {
 			"mcmgr mod list --outdated",
 		},
 	}
+	var (
+		outdated *bool
+		channels channelFlags
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		outdated = fs.Bool("outdated", false, "check each provider for newer versions")
+		channels = addChannelFlags(fs)
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr mod list")
-		var (
-			outdated = fs.Bool("outdated", false, "check each provider for newer versions")
-		)
-		channels := addChannelFlags(fs)
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -258,10 +274,16 @@ func modUpdateCmd() *Command {
 			"mcmgr mod update sodium",
 		},
 	}
+	var (
+		shared modFlags
+		dryRun *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		shared = addSharedModFlags(fs, false)
+		dryRun = fs.Bool("dry-run", false, "show what would change without downloading anything")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr mod update")
-		shared := addSharedModFlags(fs, false)
-		dryRun := fs.Bool("dry-run", false, "show what would change without downloading anything")
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err
@@ -328,13 +350,18 @@ func modSearchCmd() *Command {
 			"mcmgr mod search worldedit --any",
 		},
 	}
+	var (
+		providerName *string
+		limit        *int
+		any          *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		providerName = fs.String("provider", "", "modrinth (default), curseforge, or all")
+		limit = fs.Int("limit", 15, "maximum results per provider")
+		any = fs.Bool("any", false, "do not filter by the server's version and loader")
+	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr mod search")
-		var (
-			providerName = fs.String("provider", "", "modrinth (default), curseforge, or all")
-			limit        = fs.Int("limit", 15, "maximum results per provider")
-			any          = fs.Bool("any", false, "do not filter by the server's version and loader")
-		)
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err

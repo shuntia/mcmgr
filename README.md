@@ -436,6 +436,22 @@ Server settings can be written `properties.white-list` in full, but the bare
 Minecraft name works too, and common spellings are accepted (`whitelist`,
 `port`, `online-mode`). `mcmgr config list` shows every key grouped by file.
 
+## Shell completion
+
+`mcmgr completion <shell>` prints a completion script generated from the command
+tree itself, so it offers exactly the commands, aliases and flags this binary
+has. The script is static: completing a word never runs mcmgr, so it costs
+nothing and works with no server configured.
+
+```bash
+mcmgr completion bash > ~/.local/share/bash-completion/completions/mcmgr
+mcmgr completion zsh > "${fpath[1]}/_mcmgr"
+mcmgr completion fish > ~/.config/fish/completions/mcmgr.fish
+mcmgr completion powershell | Out-String | Invoke-Expression   # add to $PROFILE
+```
+
+Then start a new shell.
+
 ## Guided setup
 
 `mcmgr new` and `mcmgr init` prompt only for what they still need, so flags and

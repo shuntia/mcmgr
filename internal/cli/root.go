@@ -47,7 +47,7 @@ func Root() *Command {
 	for _, name := range shortcutNames {
 		root.Sub = append(root.Sub, shortcut(srv, name))
 	}
-	root.Sub = append(root.Sub, versionCmd())
+	root.Sub = append(root.Sub, versionCmd(), completionCmd())
 	return root
 }
 
@@ -81,6 +81,7 @@ func shortcut(parent *Command, name string) *Command {
 		Long:     target.Long,
 		Examples: target.Examples,
 		Group:    "Shortcuts",
+		Flags:    target.Flags,
 		Run:      target.Run,
 	}
 }
