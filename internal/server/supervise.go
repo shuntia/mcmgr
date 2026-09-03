@@ -216,7 +216,23 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 
 // preflight validates that the server can actually be started, with errors
 // that say what to do rather than surfacing a raw exec failure.
+//
+// Each check stands on its own so `mcmgr doctor` can report them all rather
+// than stopping at the first, which is why they are not inlined here.
 func preflight(cfg *config.Config) error {
+	if err := CheckLaunchTarget(cfg); err != nil {
+		return err
+	}
+	if err := CheckJavaBinary(cfg); err != nil {
+		return err
+	}
+	return CheckEULA(cfg.Dir())
+}
+
+// CheckLaunchTarget reports whether the thing the JVM is pointed at — a server
+// jar, or the argument file loaders such as NeoForge boot from — is configured
+// and present on disk.
+func CheckLaunchTarget(cfg *config.Config) error {
 	switch {
 	case len(cfg.LaunchArgs) > 0:
 		// Argument-file launches: verify the referenced file exists, since a
@@ -237,19 +253,23 @@ func preflight(cfg *config.Config) error {
 			return fmt.Errorf("server jar %s is missing; run 'mcmgr server install' to download it", cfg.Jar)
 		}
 	}
+	return nil
+}
+
+// CheckJavaBinary reports whether the configured java can be found at all.
+// CheckJava answers the harder question of whether it is new enough, at the
+// cost of actually running it.
+func CheckJavaBinary(cfg *config.Config) error {
 	if _, err := exec.LookPath(cfg.JavaBin()); err != nil {
 		return fmt.Errorf("java not found (looked for %q): install a JDK or set java.path in %s",
 			cfg.JavaBin(), config.ManifestName)
 	}
-	if err := checkEULA(cfg.Dir()); err != nil {
-		return err
-	}
 	return nil
 }
 
-// checkEULA reports the missing-EULA case up front, because otherwise the
+// CheckEULA reports the missing-EULA case up front, because otherwise the
 // server exits after one cryptic line.
-func checkEULA(dir string) error {
+func CheckEULA(dir string) error {
 	data, err := os.ReadFile(filepath.Join(dir, "eula.txt"))
 	if err != nil {
 		// No eula.txt yet: the server writes one on first run and exits. Let

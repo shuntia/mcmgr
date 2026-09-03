@@ -140,8 +140,32 @@ disk — a mismatch quietly breaks mod compatibility otherwise.
 | --- | --- |
 | `new [name] [dir]` | Create a server, asking for anything not given |
 | `init [dir]` | Adopt a server that already exists |
+| `doctor` | Check a server is ready to start, and say what is not |
 | `upgrade [version]` | Move to a new Minecraft version and refetch every mod |
 | `venv` | Manage the Java runtime a server uses |
+
+`mcmgr doctor` runs every check a start makes — the manifest, the server jar,
+Java and its version, the EULA, whether the manifest still matches what is on
+disk, whether the port is free, and whether `mods/` matches the lockfile — and
+reports all of them instead of stopping at the first, because fixing one
+otherwise only reveals the next. Each line ends in the command that fixes it,
+and the exit status is non-zero if anything failed, so it can gate a deploy:
+
+```
+$ mcmgr doctor
+survival  (stopped)
+  ok    config   /srv/minecraft/mcmgr.toml
+  fail  server   server jar fabric-server-launch.jar is missing
+                 run: mcmgr server install
+  ok    java     Java 21 at /opt/jdk21/bin/java
+  fail  eula     not accepted; the server refuses to start until it is
+                 run: mcmgr server accept-eula
+  ok    version  1.21.4 (fabric)
+  ok    port     25565 is free
+  ok    mods     12 installed, all matching mcmgr.lock.json
+
+error: 2 checks failed; see above
+```
 
 ### Java
 

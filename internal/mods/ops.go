@@ -649,6 +649,30 @@ func (e *Env) Sync(opts SyncOptions) error {
 	return e.save()
 }
 
+// Drift lists locked add-ons whose file is missing from the content directory
+// or does not match the checksum recorded for it.
+//
+// It asks exactly the question `mod sync` asks before deciding to re-download,
+// so a server that reports no drift is one sync would leave alone.
+func (e *Env) Drift() []string {
+	dir := e.Cfg.ContentPath()
+	var out []string
+	for _, entry := range e.Lock.Mods {
+		if !fileMatches(filepath.Join(dir, entry.Filename), entry.SHA1) {
+			out = append(out, entry.ID)
+		}
+	}
+	// Anything declared but never locked is missing too, and the fix is the
+	// same command.
+	for _, spec := range e.Cfg.Mods {
+		if e.Lock.Find(spec.ID) == nil {
+			out = append(out, spec.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // managedFiles is the set of jar names the lockfile accounts for.
 func (e *Env) managedFiles() map[string]bool {
 	m := map[string]bool{}

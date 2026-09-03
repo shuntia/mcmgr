@@ -20,6 +20,7 @@ func Root() *Command {
 		Sub: []*Command{
 			grouped("Getting started", newCmd()),
 			grouped("Getting started", initCmd()),
+			grouped("Getting started", doctorCmd()),
 
 			grouped("Servers", srv),
 			grouped("Mods", modCmd()),
@@ -31,6 +32,7 @@ func Root() *Command {
 		Examples: []string{
 			"mcmgr new                    # create a server, asking what it needs",
 			"mcmgr init                   # adopt a server that already exists here",
+			"mcmgr doctor                 # why will this server not start?",
 			"mcmgr mod add fabric-api sodium lithium",
 			"mcmgr start                  # start in the background (same as 'server launch')",
 			"mcmgr attach                 # open its console; Ctrl-D detaches",
