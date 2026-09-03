@@ -156,7 +156,7 @@ func (e *Env) Add(query string, opts AddOptions) error {
 		return err
 	}
 	if !opts.NoDeps {
-		if err := e.installDeps(prov, version, proj.Slug, filter, map[string]bool{proj.ID: true}, 0); err != nil {
+		if err := e.installDeps(prov, version, []string{proj.Slug}, filter, map[string]bool{proj.ID: true}, 0); err != nil {
 			return err
 		}
 	}
@@ -171,10 +171,16 @@ const maxDepDepth = 6
 
 // installDeps walks required dependencies breadth-first, installing any that
 // are not already present.
-func (e *Env) installDeps(prov Provider, v *Version, parentSlug string, f Filter, seen map[string]bool, depth int) error {
+//
+// requiredBy names the mods the whole chain hangs off, which are the ones the
+// manifest actually declares. Transitive dependencies are attributed to those
+// roots rather than to the dependency that asked for them, because the orphan
+// sweep only keeps a dependency that some declared mod still needs.
+func (e *Env) installDeps(prov Provider, v *Version, requiredBy []string, f Filter, seen map[string]bool, depth int) error {
 	if depth >= maxDepDepth {
 		return nil
 	}
+	roots := strings.Join(requiredBy, ", ")
 	for _, dep := range v.Dependencies {
 		if dep.Type != "required" || dep.ProjectID == "" || seen[dep.ProjectID] {
 			continue
@@ -183,20 +189,20 @@ func (e *Env) installDeps(prov Provider, v *Version, parentSlug string, f Filter
 
 		depProj, err := prov.Project(dep.ProjectID)
 		if err != nil {
-			ui.Warn("skipping a dependency of %s: %v", parentSlug, err)
+			ui.Warn("skipping a dependency of %s: %v", roots, err)
 			continue
 		}
 		// A required dependency is not refused the way a direct add is:
 		// declining it would break the mod that asked for it.
 		if depProj.ClientOnly() {
 			ui.Warn("%s requires %s, which is marked client-only; installing it anyway",
-				parentSlug, depProj.Name)
+				roots, depProj.Name)
 		}
 
-		// Already installed: just record the new dependant.
+		// Already installed: just record any new dependant.
 		if existing := e.Lock.Find(depProj.Slug); existing != nil {
-			if !containsFold(existing.RequiredBy, parentSlug) && !existing.Explicit {
-				existing.RequiredBy = append(existing.RequiredBy, parentSlug)
+			if !existing.Explicit {
+				existing.RequiredBy = mergeStrings(existing.RequiredBy, requiredBy)
 			}
 			continue
 		}
@@ -216,10 +222,10 @@ func (e *Env) installDeps(prov Provider, v *Version, parentSlug string, f Filter
 			continue
 		}
 
-		if err := e.install(depProj, depVer, false, []string{parentSlug}); err != nil {
+		if err := e.install(depProj, depVer, false, requiredBy); err != nil {
 			return err
 		}
-		if err := e.installDeps(prov, depVer, parentSlug, f, seen, depth+1); err != nil {
+		if err := e.installDeps(prov, depVer, requiredBy, f, seen, depth+1); err != nil {
 			return err
 		}
 	}
@@ -601,7 +607,7 @@ func (e *Env) Sync(opts SyncOptions) error {
 		if err := e.install(proj, version, true, nil); err != nil {
 			return err
 		}
-		if err := e.installDeps(prov, version, proj.Slug, filter, map[string]bool{proj.ID: true}, 0); err != nil {
+		if err := e.installDeps(prov, version, []string{proj.Slug}, filter, map[string]bool{proj.ID: true}, 0); err != nil {
 			return err
 		}
 		installed++

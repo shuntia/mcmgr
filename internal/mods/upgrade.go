@@ -196,19 +196,30 @@ func (e *Env) ApplyUpgrade(plan *UpgradePlan, ch Channels) error {
 		}
 	}
 
-	// New versions can want different dependencies than the old ones did.
+	// New versions can want different dependencies than the old ones did, and
+	// that is as true of a mod installed only as a dependency as of one the
+	// user asked for by name, so every upgraded entry is re-resolved.
 	for _, entry := range plan.Ready() {
 		if entry.version == nil || entry.project == nil {
 			continue
 		}
+		// Whatever a dependency-only mod pulls in belongs to the mods that
+		// require it, not to the mod itself: only declared mods keep a
+		// dependency alive through the orphan sweep below.
+		roots := []string{entry.ID}
 		if locked := e.Lock.Find(entry.ID); locked != nil && !locked.Explicit {
-			continue
+			if len(locked.RequiredBy) == 0 {
+				// Nothing needs it any more; the sweep is about to drop it,
+				// so installing its dependencies would only add more orphans.
+				continue
+			}
+			roots = locked.RequiredBy
 		}
 		prov, err := Get(entry.project.Provider)
 		if err != nil {
 			continue
 		}
-		if err := e.installDeps(prov, entry.version, entry.ID, filter,
+		if err := e.installDeps(prov, entry.version, roots, filter,
 			map[string]bool{entry.project.ID: true}, 0); err != nil {
 			return err
 		}

@@ -143,10 +143,18 @@ type Provider interface {
 	Version(versionID string) (*Version, error)
 }
 
+// overrides substitutes providers by name. Only tests populate it, which is
+// how they exercise resolution and dependency walking without the network.
+var overrides map[string]Provider
+
 // Get returns the provider with the given name. An empty name means Modrinth,
 // which needs no credentials.
 func Get(name string) (Provider, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if p, ok := overrides[key]; ok {
+		return p, nil
+	}
+	switch key {
 	case "", ProviderModrinth:
 		return &Modrinth{}, nil
 	case ProviderCurseForge, "cf", "curse":

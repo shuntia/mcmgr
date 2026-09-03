@@ -1,6 +1,7 @@
 package mods
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -195,5 +196,157 @@ func TestClientOnlyInstalledReporting(t *testing.T) {
 		if LockedClientOnly(config.LockedMod{ServerSide: side}) {
 			t.Errorf("server_side=%q must not count as client-only", side)
 		}
+	}
+}
+
+// fakeProvider serves canned projects and versions so dependency resolution
+// can be exercised without the network.
+type fakeProvider struct {
+	projects  map[string]*Project // keyed by both id and slug
+	versions  map[string]*Version // keyed by version id
+	byProject map[string][]Version
+}
+
+func (f *fakeProvider) Name() string { return ProviderModrinth }
+
+func (f *fakeProvider) Search(string, Filter, int) ([]Project, error) { return nil, nil }
+
+func (f *fakeProvider) Project(idOrSlug string) (*Project, error) {
+	if p, ok := f.projects[idOrSlug]; ok {
+		return p, nil
+	}
+	return nil, fmt.Errorf("no project %q", idOrSlug)
+}
+
+func (f *fakeProvider) Versions(projectID string, _ Filter) ([]Version, error) {
+	return f.byProject[projectID], nil
+}
+
+func (f *fakeProvider) Version(id string) (*Version, error) {
+	if v, ok := f.versions[id]; ok {
+		return v, nil
+	}
+	return nil, fmt.Errorf("no version %q", id)
+}
+
+// useProvider substitutes p for modrinth for the duration of one test.
+func useProvider(t *testing.T, p Provider) {
+	t.Helper()
+	overrides = map[string]Provider{ProviderModrinth: p}
+	t.Cleanup(func() { overrides = nil })
+}
+
+// TestApplyUpgradeResolvesDepsOfDependencies covers a mod that is itself only
+// installed as a dependency and gains a new dependency of its own when it is
+// bumped to a build for the new Minecraft version.
+//
+// The new dependency has to be installed, and it has to be attributed to the
+// explicit mod at the root of the chain rather than to the dependency that
+// asked for it, or the orphan sweep at the end of the upgrade deletes it again.
+func TestApplyUpgradeResolvesDepsOfDependencies(t *testing.T) {
+	ui.Quiet = true
+	dir := t.TempDir()
+
+	cfg := &config.Config{
+		Name: "test", Minecraft: "1.21.4", Loader: config.Fabric,
+		Mods: []config.ModSpec{{ID: "create", Provider: ProviderModrinth, Version: "*", Name: "Create"}},
+	}
+	cfg.SetDir(dir)
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	lock := &config.Lock{Mods: []config.LockedMod{
+		{ID: "create", Name: "Create", Provider: ProviderModrinth, ProjectID: "P-create",
+			VersionNumber: "1.0", Filename: "create-1.0.jar", Explicit: true},
+		{ID: "flywheel", Name: "Flywheel", Provider: ProviderModrinth, ProjectID: "P-flywheel",
+			VersionNumber: "1.0", Filename: "flywheel-1.0.jar", RequiredBy: []string{"create"}},
+	}}
+	if err := cfg.SaveLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	// Every jar the upgrade installs is already on disk with no recorded
+	// checksum, so install() records it instead of downloading it.
+	if err := os.MkdirAll(cfg.ContentPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"create-1.0.jar", "flywheel-1.0.jar",
+		"create-2.0.jar", "flywheel-2.0.jar", "ponder-2.0.jar",
+	} {
+		if err := os.WriteFile(filepath.Join(cfg.ContentPath(), name), []byte("jar"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	create := &Project{Provider: ProviderModrinth, ID: "P-create", Slug: "create", Name: "Create"}
+	flywheel := &Project{Provider: ProviderModrinth, ID: "P-flywheel", Slug: "flywheel", Name: "Flywheel"}
+	ponder := &Project{Provider: ProviderModrinth, ID: "P-ponder", Slug: "ponder", Name: "Ponder"}
+	ponderVer := &Version{Provider: ProviderModrinth, ID: "V-ponder-2", ProjectID: "P-ponder",
+		Number: "2.0", Filename: "ponder-2.0.jar"}
+	useProvider(t, &fakeProvider{
+		projects: map[string]*Project{
+			"P-create": create, "create": create,
+			"P-flywheel": flywheel, "flywheel": flywheel,
+			"P-ponder": ponder, "ponder": ponder,
+		},
+		versions:  map[string]*Version{"V-ponder-2": ponderVer},
+		byProject: map[string][]Version{"P-ponder": {*ponderVer}},
+	})
+
+	env, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create itself gains nothing new; Flywheel, a dependency-only mod, now
+	// needs Ponder.
+	plan := &UpgradePlan{From: "1.21.4", To: "1.21.5", Entries: []UpgradeEntry{
+		{
+			ID: "create", Name: "Create", Current: "1.0", Target: "2.0",
+			project: &Project{Provider: ProviderModrinth, ID: "P-create", Slug: "create", Name: "Create"},
+			version: &Version{Provider: ProviderModrinth, ID: "V-create-2", ProjectID: "P-create",
+				Number: "2.0", Filename: "create-2.0.jar",
+				Dependencies: []Dependency{{ProjectID: "P-flywheel", Type: "required"}}},
+		},
+		{
+			ID: "flywheel", Name: "Flywheel", Current: "1.0", Target: "2.0",
+			project: &Project{Provider: ProviderModrinth, ID: "P-flywheel", Slug: "flywheel", Name: "Flywheel"},
+			version: &Version{Provider: ProviderModrinth, ID: "V-flywheel-2", ProjectID: "P-flywheel",
+				Number: "2.0", Filename: "flywheel-2.0.jar",
+				Dependencies: []Dependency{{ProjectID: "P-ponder", VersionID: "V-ponder-2", Type: "required"}}},
+		},
+	}}
+
+	if err := env.ApplyUpgrade(plan, Channels{}); err != nil {
+		t.Fatalf("ApplyUpgrade: %v", err)
+	}
+
+	locked := env.Lock.Find("ponder")
+	if locked == nil {
+		t.Fatal("a new dependency of an upgraded dependency was never installed")
+	}
+	if locked.Explicit {
+		t.Error("ponder should be recorded as a dependency, not as an explicit mod")
+	}
+	// Attributed to create: nothing in the manifest requires flywheel by name,
+	// so a ponder that only names flywheel would be pruned as an orphan.
+	if len(locked.RequiredBy) == 0 || locked.RequiredBy[0] != "create" {
+		t.Errorf("ponder.RequiredBy = %v, want the explicit mod [create]", locked.RequiredBy)
+	}
+
+	// And it survives on disk, which is what the orphan sweep decides.
+	if _, err := os.Stat(filepath.Join(env.Cfg.ContentPath(), "ponder-2.0.jar")); err != nil {
+		t.Errorf("ponder's jar should still be installed: %v", err)
+	}
+	reloaded, err := config.Load(env.Cfg.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := reloaded.LoadLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Find("ponder") == nil {
+		t.Error("the lockfile on disk should record ponder")
 	}
 }
