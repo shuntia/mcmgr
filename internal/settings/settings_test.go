@@ -322,3 +322,35 @@ func TestGlobalCreationDefaults(t *testing.T) {
 		t.Error("an unsupported loader should be rejected as a global default")
 	}
 }
+
+// TestKindValidationEverywhere covers bad values being caught by Validate
+// rather than surfacing later from Set, so an editor can flag them as typed.
+func TestKindValidationEverywhere(t *testing.T) {
+	store := newTestStore(t)
+
+	beta, _ := store.Resolve("beta")
+	if err := store.Validate(beta, "maybe"); err == nil {
+		t.Error("a manifest bool should reject 'maybe'")
+	}
+	if err := store.Validate(beta, "true"); err != nil {
+		t.Errorf("true: %v", err)
+	}
+
+	major, _ := store.Resolve("java.required_major")
+	if err := store.Validate(major, "twenty-one"); err == nil {
+		t.Error("java.required_major should reject text")
+	}
+	if err := store.Validate(major, ""); err != nil {
+		t.Errorf("an empty java.required_major means unset: %v", err)
+	}
+
+	port, _ := store.Resolve("port")
+	if err := store.Validate(port, "70000"); err == nil {
+		t.Error("port 70000 should be rejected")
+	}
+
+	mc, _ := store.Resolve("minecraft")
+	if err := store.Validate(mc, "  "); err == nil {
+		t.Error("a blank minecraft version should be rejected")
+	}
+}

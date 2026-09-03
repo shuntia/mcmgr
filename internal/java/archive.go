@@ -36,6 +36,12 @@ func extract(archive, dst string) error {
 // otherwise escape the directory being unpacked into. This is the zip-slip
 // check, and it applies to tar just as much as zip.
 func safePath(dst, name string) (string, error) {
+	// Zip entries written by Windows tools use backslashes. On Unix a
+	// backslash is an ordinary filename byte, so "..\evil" would slip
+	// past the check below as a single odd-looking file. Treat it as a
+	// separator on every platform; no real runtime archive has a literal
+	// backslash in an entry name.
+	name = strings.ReplaceAll(name, `\`, "/")
 	cleaned := filepath.Clean(filepath.FromSlash(name))
 	if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || cleaned == ".." {
 		return "", fmt.Errorf("archive entry %q would write outside the target directory", name)
@@ -127,7 +133,12 @@ func extractTarGz(archive, dst string) error {
 			}
 		case tar.TypeSymlink:
 			// Temurin uses symlinks inside the runtime, e.g. for man pages.
-			// Refuse any that point outside the tree.
+			// Refuse any that point outside the tree. filepath.Join drops a
+			// leading separator on its later arguments, so an absolute
+			// target has to be rejected on its own.
+			if filepath.IsAbs(hdr.Linkname) || filepath.IsAbs(filepath.FromSlash(hdr.Linkname)) {
+				continue
+			}
 			if _, err := safePath(dst, filepath.Join(filepath.Dir(hdr.Name), hdr.Linkname)); err != nil {
 				continue
 			}

@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +14,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/charmbracelet/x/term"
 
 	"mcmgr/internal/config"
 )
@@ -198,10 +202,12 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 	defer ClearState(cfg.Dir())
 
 	go s.acceptLoop()
+	// Whatever signals this process, the server is only ever asked to stop
+	// through its console; see installSignalHandler.
+	defer s.installSignalHandler()()
 	if opts.Foreground {
 		go s.mirrorToTerminal()
 		go s.forwardTerminalInput()
-		defer s.installSignalHandler()()
 	}
 
 	code := s.wait()
@@ -292,8 +298,9 @@ func Command(cfg *config.Config, extraJava []string) *exec.Cmd {
 
 	cmd := exec.Command(cfg.JavaBin(), args...)
 	cmd.Dir = cfg.Dir()
-	// The server's console is this process's pipes, never a window of its own.
-	hideConsole(cmd)
+	// The server's console is this process's pipes, never a window or a
+	// terminal of its own, and no signal reaches it except through mcmgr.
+	isolateChild(cmd)
 	return cmd
 }
 
@@ -407,7 +414,7 @@ func (s *supervisor) requestStop(timeoutSecs int) {
 		timeoutSecs = s.cfg.StopTimeoutSecs()
 	}
 	go func() {
-		s.emit("[mcmgr] stopping: saving worlds and shutting down")
+		s.emit(fmt.Sprintf("[mcmgr] stopping: sent 'stop' to the console, waiting up to %ds for it to save and exit", timeoutSecs))
 		if err := s.writeConsole("stop"); err != nil {
 			// If stdin is gone the console command cannot be delivered, so go
 			// straight to terminating the process.
@@ -418,7 +425,7 @@ func (s *supervisor) requestStop(timeoutSecs int) {
 		select {
 		case <-s.exited:
 		case <-time.After(time.Duration(timeoutSecs) * time.Second):
-			s.emit(fmt.Sprintf("[mcmgr] did not exit within %ds, terminating", timeoutSecs))
+			s.emit(fmt.Sprintf("[mcmgr] still running %ds after 'stop', terminating (raise stop_timeout_secs if saves take longer)", timeoutSecs))
 			_ = s.cmd.Process.Kill()
 		}
 	}()
@@ -571,7 +578,9 @@ func (s *supervisor) handle(conn net.Conn) {
 
 // mirrorToTerminal prints console output to stdout for foreground runs.
 func (s *supervisor) mirrorToTerminal() {
-	_, ch := s.hub.subscribe(0)
+	// A negative tail keeps the whole ring: the "[mcmgr] started" banner
+	// and the JVM's first lines are already in it by the time this runs.
+	_, ch := s.hub.subscribe(-1)
 	out := bufio.NewWriter(os.Stdout)
 	defer out.Flush()
 	for line := range ch {
@@ -593,27 +602,46 @@ func (s *supervisor) forwardTerminalInput() {
 			}
 		}
 		if err != nil {
-			return // stdin closed (piped input, or Ctrl-D)
+			// stdin closed: piped input ran out, or Ctrl-D. In-process there
+			// is nothing to detach from, so say so rather than going quiet.
+			if errors.Is(err, io.EOF) && isTerminal(os.Stdin) {
+				fmt.Fprintln(os.Stderr, "[mcmgr] stdin closed; the console no longer accepts input here (Ctrl-C stops the server)")
+			}
+			return
 		}
 	}
 }
 
-// installSignalHandler makes Ctrl-C in a foreground run perform a clean
-// shutdown, with a second Ctrl-C escalating to a kill. The returned function
+// isTerminal reports whether f is an interactive terminal. A plain
+// char-device check would count /dev/null, which is what a service manager
+// hands a foreground run.
+func isTerminal(f *os.File) bool {
+	return term.IsTerminal(f.Fd())
+}
+
+// installSignalHandler turns any signal asking this process to stop into the
+// server's own "stop" console command, so the JVM is never terminated by a
+// signal when a clean shutdown was meant.
+//
+// That covers Ctrl-C in a foreground run, SIGTERM from a service manager or a
+// plain kill, and SIGHUP when the terminal goes away. The JVM sits in its own
+// process group (see isolateChild) so none of these reach it directly; the
+// supervisor stays alive to wait for the save to finish. A second signal
+// escalates to a kill, for a server that is wedged. The returned function
 // uninstalls the handler.
 func (s *supervisor) installSignalHandler() func() {
 	ch := make(chan os.Signal, 2)
-	signal.Notify(ch, os.Interrupt)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		count := 0
-		for range ch {
+		for sig := range ch {
 			count++
 			if count == 1 {
-				fmt.Fprintln(os.Stderr, "\n[mcmgr] interrupt: stopping server cleanly (Ctrl-C again to force)")
+				fmt.Fprintf(os.Stderr, "\n[mcmgr] %s: stopping server cleanly via its console (again to force)\n", sig)
 				s.requestStop(0)
 				continue
 			}
-			fmt.Fprintln(os.Stderr, "[mcmgr] second interrupt: terminating")
+			fmt.Fprintf(os.Stderr, "[mcmgr] second %s: terminating\n", sig)
 			_ = s.cmd.Process.Kill()
 			return
 		}

@@ -75,7 +75,10 @@ func Load(dir string) (*File, error) {
 		}
 		k := strings.TrimSpace(key)
 		f.index[k] = len(f.lines)
-		f.lines = append(f.lines, line{key: k, value: unescape(strings.TrimSpace(value))})
+		// Java properties skip whitespace after the separator but keep
+		// trailing whitespace, so a motd ending in spaces must survive a
+		// round trip.
+		f.lines = append(f.lines, line{key: k, value: unescape(strings.TrimLeft(value, " \t"))})
 	}
 	return f, sc.Err()
 }
@@ -239,14 +242,18 @@ type Setting struct {
 	Help string
 	// Choices, when set, restricts a string setting to these values.
 	Choices []string
+	// Min and Max bound an int setting when Max is non-zero. They follow what
+	// the server itself accepts, so a value outside them is rejected here
+	// rather than silently clamped or refused at startup.
+	Min, Max int
 }
 
 // Known lists the settings mcmgr surfaces in prompts and `config list`. Any
 // other key in server.properties can still be read and written by name.
 var Known = []Setting{
-	{Key: "server-port", Default: "25565", Kind: "int", Help: "TCP port the server listens on"},
+	{Key: "server-port", Default: "25565", Kind: "int", Help: "TCP port the server listens on", Min: 1, Max: 65535},
 	{Key: "motd", Default: "A Minecraft Server", Kind: "string", Help: "Message shown in the server list"},
-	{Key: "max-players", Default: "20", Kind: "int", Help: "Maximum simultaneous players"},
+	{Key: "max-players", Default: "20", Kind: "int", Help: "Maximum simultaneous players", Min: 1, Max: 1<<31 - 1},
 	{Key: "white-list", Default: "false", Kind: "bool", Help: "Only allow players on the whitelist"},
 	{Key: "enforce-whitelist", Default: "false", Kind: "bool", Help: "Kick players who are removed from the whitelist"},
 	{Key: "online-mode", Default: "true", Kind: "bool", Help: "Verify players against Mojang's authentication servers"},
@@ -258,9 +265,9 @@ var Known = []Setting{
 	{Key: "hardcore", Default: "false", Kind: "bool", Help: "Death is permanent and the world locks to spectator"},
 	{Key: "level-name", Default: "world", Kind: "string", Help: "World directory name"},
 	{Key: "level-seed", Default: "", Kind: "string", Help: "Seed used when generating a new world"},
-	{Key: "view-distance", Default: "10", Kind: "int", Help: "Chunk render distance sent to clients"},
-	{Key: "simulation-distance", Default: "10", Kind: "int", Help: "Chunk radius that stays fully ticking"},
-	{Key: "spawn-protection", Default: "16", Kind: "int", Help: "Radius around spawn only operators may build in"},
+	{Key: "view-distance", Default: "10", Kind: "int", Help: "Chunk render distance sent to clients", Min: 3, Max: 32},
+	{Key: "simulation-distance", Default: "10", Kind: "int", Help: "Chunk radius that stays fully ticking", Min: 3, Max: 32},
+	{Key: "spawn-protection", Default: "16", Kind: "int", Help: "Radius around spawn only operators may build in", Min: 0, Max: 1<<31 - 1},
 	{Key: "enable-command-block", Default: "false", Kind: "bool", Help: "Allow command blocks to run"},
 	{Key: "allow-flight", Default: "false", Kind: "bool", Help: "Permit flight in survival mode"},
 	{Key: "allow-nether", Default: "true", Kind: "bool", Help: "Enable the Nether"},
@@ -292,8 +299,15 @@ func (s Setting) Validate(value string) error {
 			return fmt.Errorf("%s must be true or false, got %q", s.Key, value)
 		}
 	case "int":
-		if _, err := strconv.Atoi(value); err != nil {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
 			return fmt.Errorf("%s must be a whole number, got %q", s.Key, value)
+		}
+		if s.Max != 0 && (n < s.Min || n > s.Max) {
+			if s.Max == 1<<31-1 {
+				return fmt.Errorf("%s must be at least %d, got %d", s.Key, s.Min, n)
+			}
+			return fmt.Errorf("%s must be between %d and %d, got %d", s.Key, s.Min, s.Max, n)
 		}
 	}
 	if len(s.Choices) > 0 {

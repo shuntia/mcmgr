@@ -382,9 +382,6 @@ func editOne(store *settings.Store, key settings.Key) error {
 	case key.Kind == settings.KindSecret:
 		value, err = prompt.Secret(key.Name, desc)
 
-	case key.Kind == settings.KindInt:
-		value, err = prompt.Text(key.Name, desc, current, prompt.ValidateInt(key.Name, 0, 1<<30))
-
 	default:
 		value, err = prompt.Text(key.Name, desc, current, func(s string) error {
 			return store.Validate(key, s)

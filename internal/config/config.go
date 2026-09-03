@@ -441,12 +441,17 @@ func WriteFileAtomic(path string, data []byte) error {
 		os.Remove(name)
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(name)
 		return err
 	}
-	// Windows will not rename onto an existing path.
-	os.Remove(path)
+	// os.Rename replaces an existing file on every platform, so the old
+	// contents survive if anything above failed.
 	if err := os.Rename(name, path); err != nil {
 		os.Remove(name)
 		return err

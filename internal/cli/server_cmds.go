@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"mcmgr/internal/config"
+	"mcmgr/internal/prompt"
 	"mcmgr/internal/server"
 	"mcmgr/internal/ui"
 )
@@ -18,23 +20,35 @@ func serverCmd() *Command {
 		Short:   "Create, run and control Minecraft servers",
 		Long:    "Create, run and control Minecraft servers.",
 		Sub: []*Command{
-			serverCreateCmd(),
-			serverInstallCmd(),
-			serverListCmd(),
-			serverUseCmd(),
-			serverForgetCmd(),
-			serverRunCmd(),
-			serverLaunchCmd(),
-			serverAttachCmd(),
-			serverStopCmd(),
-			serverRestartCmd(),
-			serverKillCmd(),
-			serverStatusCmd(),
-			serverLogsCmd(),
-			serverCmdCmd(),
-			serverAcceptEULACmd(),
-			serverSetJarCmd(),
+			grouped("Run and control", serverRunCmd()),
+			grouped("Run and control", serverLaunchCmd()),
+			grouped("Run and control", serverAttachCmd()),
+			grouped("Run and control", serverStopCmd()),
+			grouped("Run and control", serverRestartCmd()),
+			grouped("Run and control", serverKillCmd()),
+
+			grouped("Inspect", serverStatusCmd()),
+			grouped("Inspect", serverLogsCmd()),
+			grouped("Inspect", serverCmdCmd()),
+
+			grouped("Set up", serverCreateCmd()),
+			grouped("Set up", serverInstallCmd()),
+			grouped("Set up", serverAcceptEULACmd()),
+			grouped("Set up", serverSetJarCmd()),
+
+			grouped("Registry", serverListCmd()),
+			grouped("Registry", serverUseCmd()),
+			grouped("Registry", serverForgetCmd()),
+
 			serverSuperviseCmd(),
+		},
+		Examples: []string{
+			"mcmgr server run             # console here; Ctrl-C stops, Ctrl-D detaches",
+			"mcmgr server launch          # start in the background",
+			"mcmgr server attach          # reopen the console of a background server",
+			"mcmgr server stop",
+			"mcmgr server logs -f",
+			"mcmgr server list",
 		},
 	}
 }
@@ -319,16 +333,27 @@ func serverForgetCmd() *Command {
 func serverRunCmd() *Command {
 	cmd := &Command{
 		Name:  "run",
-		Short: "Run the server in this terminal",
-		Long: "Run the server in the foreground with its console attached to this terminal.\n" +
-			"Typed lines go to the server console. Ctrl-C shuts the server down cleanly;\n" +
-			"a second Ctrl-C terminates it.\n\n" +
-			"Use 'server launch' instead to run it in the background.",
+		Short: "Run the server with its console in this terminal",
+		Long: "Start the server and keep its console in this terminal, like running the jar\n" +
+			"by hand. Typed lines go to the server console.\n\n" +
+			"  Ctrl-C   shuts the server down cleanly; a second Ctrl-C terminates it\n" +
+			"  Ctrl-D   detaches and leaves the server running in the background\n\n" +
+			"The server itself runs in a detached supervisor, so closing the terminal does\n" +
+			"not kill it either; 'server attach' reopens the console and 'server stop'\n" +
+			"shuts it down. Pass --foreground to keep the supervisor in this process\n" +
+			"instead, which is what a service manager such as systemd expects. That is\n" +
+			"also the default when stdin is not a terminal.",
+		Examples: []string{
+			"mcmgr server run",
+			"mcmgr server run --java-arg -XX:+UseZGC",
+			"mcmgr server run --foreground     # for systemd, docker and the like",
+		},
 	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server run")
 		var javaArgs stringList
 		fs.Var(&javaArgs, "java-arg", "extra JVM argument for this run; repeatable")
+		foreground := fs.Bool("foreground", false, "keep the supervisor in this process; Ctrl-D cannot detach")
 		if _, err := parse(fs, g, args); err != nil {
 			return err
 		}
@@ -341,7 +366,35 @@ func serverRunCmd() *Command {
 			return err
 		}
 
-		code, err := server.Supervise(cfg, server.Options{Foreground: true, ExtraJavaArgs: javaArgs})
+		if *foreground || !prompt.Interactive() {
+			code, err := server.Supervise(cfg, server.Options{Foreground: true, ExtraJavaArgs: javaArgs})
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				reportFailure(cfg.Dir())
+				return fmt.Errorf("server exited with code %d", code)
+			}
+			return nil
+		}
+
+		ui.Step("starting %s (%s %s)", cfg.Name, cfg.Loader, cfg.Minecraft)
+		if _, err := server.Launch(cfg, server.Options{ExtraJavaArgs: javaArgs}); err != nil {
+			reportFailure(cfg.Dir())
+			return err
+		}
+		live, err := server.Probe(cfg.Dir())
+		if err != nil || live == nil {
+			return fmt.Errorf("server started but is no longer reachable")
+		}
+		code, err := server.Attach(live, server.AttachOptions{
+			Tail:           ringCapacityHint, // the server just started, so show everything so far
+			InterruptStops: true,
+			StopTimeout:    cfg.StopTimeoutSecs(),
+		})
+		if errors.Is(err, server.ErrDetached) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -397,7 +450,11 @@ func serverLaunchCmd() *Command {
 			if err != nil || live == nil {
 				return fmt.Errorf("server started but is no longer reachable")
 			}
-			return server.Attach(live, 200)
+			_, err = server.Attach(live, server.AttachOptions{Tail: 200})
+			if errors.Is(err, server.ErrDetached) {
+				return nil
+			}
+			return err
 		}
 		ui.Info("       console:  mcmgr server attach -s %s", cfg.Name)
 		ui.Info("       shutdown: mcmgr server stop -s %s", cfg.Name)
@@ -411,7 +468,8 @@ func serverAttachCmd() *Command {
 		Name:  "attach",
 		Short: "Attach to a running server's console",
 		Long: "Stream a running server's console output and send it typed commands.\n\n" +
-			"Ctrl-C or Ctrl-D detaches and leaves the server running.",
+			"Ctrl-C or Ctrl-D detaches and leaves the server running. Use 'server run'\n" +
+			"for a console where Ctrl-C stops the server instead.",
 	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr server attach")
@@ -430,7 +488,11 @@ func serverAttachCmd() *Command {
 		if !live.Responsive {
 			return fmt.Errorf("the supervisor for %s is not responding; try 'mcmgr server kill'", cfg.Name)
 		}
-		return server.Attach(live, *tail)
+		_, err = server.Attach(live, server.AttachOptions{Tail: *tail})
+		if errors.Is(err, server.ErrDetached) {
+			return nil
+		}
+		return err
 	}
 	return cmd
 }
@@ -735,6 +797,10 @@ func serverSuperviseCmd() *Command {
 	}
 	return cmd
 }
+
+// ringCapacityHint is more lines than a server emits between starting and
+// answering its control port, so 'server run' shows its output from the top.
+const ringCapacityHint = 1000
 
 // requireRunning fetches the live server or explains that there is none.
 func requireRunning(cfg *config.Config) (*server.Live, error) {

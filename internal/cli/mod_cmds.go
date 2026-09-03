@@ -19,13 +19,20 @@ func modCmd() *Command {
 			"Every command that writes to the mods directory refuses to run while the\n" +
 			"server is up, so jars are never swapped under a live JVM.",
 		Sub: []*Command{
-			modAddCmd(),
-			modRemoveCmd(),
-			modListCmd(),
-			modUpdateCmd(),
-			modSyncCmd(),
-			modSearchCmd(),
-			modInfoCmd(),
+			grouped("Change", modAddCmd()),
+			grouped("Change", modRemoveCmd()),
+			grouped("Change", modUpdateCmd()),
+			grouped("Change", modSyncCmd()),
+
+			grouped("Browse", modListCmd()),
+			grouped("Browse", modSearchCmd()),
+			grouped("Browse", modInfoCmd()),
+		},
+		Examples: []string{
+			"mcmgr mod add fabric-api sodium lithium",
+			"mcmgr mod list --outdated",
+			"mcmgr mod update --dry-run",
+			"mcmgr mod search shaders",
 		},
 	}
 }
@@ -255,7 +262,8 @@ func modUpdateCmd() *Command {
 		fs, g := newFlags(cmd, "mcmgr mod update")
 		shared := addSharedModFlags(fs, false)
 		dryRun := fs.Bool("dry-run", false, "show what would change without downloading anything")
-		if _, err := parse(fs, g, args); err != nil {
+		rest, err := parse(fs, g, args)
+		if err != nil {
 			return err
 		}
 
@@ -263,7 +271,7 @@ func modUpdateCmd() *Command {
 		if err != nil {
 			return err
 		}
-		return env.Update(fs.Args(), mods.UpdateOptions{
+		return env.Update(rest, mods.UpdateOptions{
 			DryRun:   *dryRun,
 			Channels: shared.channels.resolve(fs, env.Cfg),
 			Force:    *shared.force,

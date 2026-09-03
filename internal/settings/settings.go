@@ -362,8 +362,24 @@ func (s *Store) getManifest(name string) string {
 // memoryPattern matches JVM heap sizes such as 4G, 512M or 2048.
 var memoryPattern = regexp.MustCompile(`^\d+[kKmMgG]?$`)
 
-// Validate checks a value for a key without applying it.
+// Validate checks a value for a key without applying it, so a bad value is
+// reported where it is typed rather than failing later at save time.
 func (s *Store) Validate(k Key, value string) error {
+	// Kind checks apply everywhere. An empty value is allowed for manifest
+	// and global keys, where it means "unset".
+	switch k.Kind {
+	case KindBool:
+		if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil && !(value == "" && k.Scope != Properties) {
+			return fmt.Errorf("%s must be true or false, got %q", k.Name, value)
+		}
+	case KindInt:
+		if value != "" || k.Scope == Properties {
+			if _, err := strconv.Atoi(strings.TrimSpace(value)); err != nil {
+				return fmt.Errorf("%s must be a whole number, got %q", k.Name, value)
+			}
+		}
+	}
+
 	switch k.Scope {
 	case Properties:
 		name := strings.TrimPrefix(k.Name, "properties.")
@@ -388,9 +404,21 @@ func (s *Store) Validate(k Key, value string) error {
 			if err != nil || n <= 0 {
 				return fmt.Errorf("stop_timeout_secs must be a positive whole number, got %q", value)
 			}
+		case "java.required_major":
+			if value == "" {
+				return nil
+			}
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 8 {
+				return fmt.Errorf("java.required_major must be a Java feature release such as 21, got %q", value)
+			}
 		case "name":
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("name cannot be empty")
+			}
+		case "minecraft":
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("minecraft version cannot be empty")
 			}
 		}
 	case Global:

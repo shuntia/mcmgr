@@ -189,6 +189,9 @@ func Download(u, dst, sum string) error {
 	if err != nil {
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -197,8 +200,8 @@ func Download(u, dst, sum string) error {
 			return fmt.Errorf("checksum mismatch for %s: expected %s, got %s", filepath.Base(dst), sum, got)
 		}
 	}
-	// Windows will not rename over an existing file.
-	os.Remove(dst)
+	// os.Rename replaces an existing file on every platform, so the old
+	// jar stays in place until the new one is complete and verified.
 	return os.Rename(tmpName, dst)
 }
 

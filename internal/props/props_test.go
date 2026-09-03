@@ -137,3 +137,69 @@ func TestSettingValidation(t *testing.T) {
 		t.Error("a non-numeric port should be rejected")
 	}
 }
+
+// TestTrailingWhitespaceSurvivesRoundTrip: Java properties skip whitespace
+// after the separator but keep it at the end of a value, so a save triggered
+// by editing another key must not strip it.
+func TestTrailingWhitespaceSurvivesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("motd=  Hello  \nmax-players=20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.Get("motd"); got != "Hello  " {
+		t.Errorf("motd = %q, want %q", got, "Hello  ")
+	}
+	f.Set("max-players", "10")
+	if err := f.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "motd=Hello  \n") {
+		t.Errorf("trailing whitespace lost:\n%q", data)
+	}
+}
+
+// TestIntRanges covers values the server would refuse or clamp, so they are
+// rejected where they are typed instead.
+func TestIntRanges(t *testing.T) {
+	port, _ := Lookup("server-port")
+	for _, bad := range []string{"0", "65536", "-1", "abc", ""} {
+		if err := port.Validate(bad); err == nil {
+			t.Errorf("server-port %q should be rejected", bad)
+		}
+	}
+	for _, good := range []string{"1", "25565", "65535", " 25565 "} {
+		if err := port.Validate(good); err != nil {
+			t.Errorf("server-port %q: %v", good, err)
+		}
+	}
+
+	view, _ := Lookup("view-distance")
+	if err := view.Validate("2"); err == nil {
+		t.Error("view-distance 2 should be rejected")
+	}
+	if err := view.Validate("32"); err != nil {
+		t.Errorf("view-distance 32: %v", err)
+	}
+
+	players, _ := Lookup("max-players")
+	if err := players.Validate("0"); err == nil {
+		t.Error("max-players 0 should be rejected")
+	}
+	if err := players.Validate("100000"); err != nil {
+		t.Errorf("max-players 100000: %v", err)
+	}
+
+	// A plain int with no range still only needs to be a number.
+	motd, _ := Lookup("motd")
+	if err := motd.Validate("anything at all"); err != nil {
+		t.Errorf("motd: %v", err)
+	}
+}

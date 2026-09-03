@@ -41,7 +41,11 @@ type Command struct {
 	Examples []string
 	// Hidden keeps internal commands out of help listings.
 	Hidden bool
-	Sub    []*Command
+	// Group is the heading a command is listed under in its parent's help.
+	// Commands with no group are listed under "Other" when any sibling has
+	// one, and in a flat list otherwise.
+	Group string
+	Sub   []*Command
 	// Run executes a leaf command. Flags are registered inside it via
 	// newFlags, so no parsing happens for commands that are not invoked.
 	Run func(args []string) error
@@ -270,7 +274,10 @@ func (g *globals) modEnv() (*mods.Env, error) {
 func printHelp(cmd *Command, path string) { printHelpWithFlags(cmd, path, nil) }
 
 func printHelpWithFlags(cmd *Command, path string, fs *flag.FlagSet) {
-	w := os.Stdout
+	renderHelp(os.Stdout, cmd, path, fs)
+}
+
+func renderHelp(w io.Writer, cmd *Command, path string, fs *flag.FlagSet) {
 	if cmd.Long != "" {
 		fmt.Fprintf(w, "%s\n\n", strings.TrimSpace(cmd.Long))
 	} else if cmd.Short != "" {
@@ -296,8 +303,18 @@ func printHelpWithFlags(cmd *Command, path string, fs *flag.FlagSet) {
 				width = n
 			}
 		}
-		for _, s := range visible {
-			fmt.Fprintf(w, "  %-*s  %s\n", width, s.Name, s.Short)
+		for i, g := range groupSubs(visible) {
+			indent := "  "
+			if g.name != "" {
+				if i > 0 {
+					fmt.Fprintln(w)
+				}
+				fmt.Fprintf(w, "  %s%s%s\n", ui.Dim, g.name, ui.Reset)
+				indent = "    "
+			}
+			for _, s := range g.cmds {
+				fmt.Fprintf(w, "%s%-*s  %s\n", indent, width, s.Name, s.Short)
+			}
 		}
 	}
 
@@ -317,6 +334,49 @@ func printHelpWithFlags(cmd *Command, path string, fs *flag.FlagSet) {
 	if len(cmd.Sub) > 0 {
 		fmt.Fprintf(w, "\nRun '%s <command> --help' for more detail.\n", path)
 	}
+}
+
+// commandGroup is one heading in a help listing and the commands under it.
+type commandGroup struct {
+	name string
+	cmds []*Command
+}
+
+// groupSubs arranges commands under their Group headings, in the order the
+// groups first appear. With no groups at all the result is one unnamed group,
+// so short trees stay a flat list.
+func groupSubs(subs []*Command) []commandGroup {
+	grouped := false
+	for _, s := range subs {
+		if s.Group != "" {
+			grouped = true
+			break
+		}
+	}
+	if !grouped {
+		return []commandGroup{{cmds: subs}}
+	}
+
+	var out []commandGroup
+	index := map[string]int{}
+	var other []*Command
+	for _, s := range subs {
+		if s.Group == "" {
+			other = append(other, s)
+			continue
+		}
+		i, ok := index[s.Group]
+		if !ok {
+			i = len(out)
+			index[s.Group] = i
+			out = append(out, commandGroup{name: s.Group})
+		}
+		out[i].cmds = append(out[i].cmds, s)
+	}
+	if len(other) > 0 {
+		out = append(out, commandGroup{name: "Other", cmds: other})
+	}
+	return out
 }
 
 func visibleSubs(cmd *Command) []*Command {

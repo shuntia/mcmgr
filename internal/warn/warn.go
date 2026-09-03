@@ -82,6 +82,16 @@ func ForProperty(key, value string, ctx Context) []Warning {
 					"  stopped server:  edit whitelist.json in the server directory\n" +
 					"Operators listed in ops.json are still subject to the whitelist.",
 			})
+		} else if truthy(ctx.Old) {
+			out = append(out, Warning{
+				Level: Danger,
+				Title: "Turning off the whitelist lets anyone who can reach the server join",
+				Body: "The whitelist is the only thing standing between a public address and every\n" +
+					"player who finds it. Without it, anyone can log in, take up player slots and\n" +
+					"grief the world; the entries in whitelist.json are kept but ignored.\n" +
+					"Keep it on unless the server is on a private network, or protected by a\n" +
+					"proxy or firewall that limits who can connect.",
+			})
 		}
 
 	case "enforce-whitelist":

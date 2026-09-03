@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -160,7 +161,7 @@ func (m editorModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if bad := m.firstInvalid(); bad >= 0 {
 			m.moveTo(bad)
-			m.status = fmt.Sprintf("%s: %v", m.rows[bad].key.Name, m.rows[bad].invalid)
+			m.status = fmt.Sprintf("cannot save: %v", m.rows[bad].invalid)
 			return m, nil
 		}
 		m.save = true
@@ -531,17 +532,29 @@ func applyEditorRows(store *settings.Store, rows []editorRow) error {
 		return nil
 	}
 
-	var dangers []warn.Warning
+	// Every dangerous change is shown under the setting it belongs to, so the
+	// confirmation is about something concrete rather than "N changes".
+	var dangerous []string
 	for _, r := range changed {
+		var ds []warn.Warning
 		for _, w := range store.Warnings(r.key, r.value) {
 			if w.Level == warn.Danger {
-				dangers = append(dangers, w)
+				ds = append(ds, w)
 			}
 		}
+		if len(ds) == 0 {
+			continue
+		}
+		dangerous = append(dangerous, r.key.Name)
+		fmt.Fprintf(os.Stderr, "\n%s%s = %s%s", ui.Bold, r.key.Name, orPlaceholder(r.value), ui.Reset)
+		warn.PrintAll(ds)
 	}
-	if len(dangers) > 0 {
-		warn.PrintAll(dangers)
-		ok, err := confirmDanger(fmt.Sprintf("Apply %s?", plural(len(changed), "change")))
+	if len(dangerous) > 0 {
+		question := fmt.Sprintf("Apply %s, including %s?", plural(len(changed), "change"), strings.Join(dangerous, ", "))
+		if len(changed) == 1 {
+			question = fmt.Sprintf("Apply %s = %s anyway?", changed[0].key.Name, orPlaceholder(changed[0].value))
+		}
+		ok, err := confirmDanger(question)
 		if err != nil {
 			return err
 		}

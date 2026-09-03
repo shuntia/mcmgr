@@ -27,3 +27,15 @@ func hideConsole(cmd *exec.Cmd) {
 	attr.HideWindow = true
 	cmd.SysProcAttr = attr
 }
+
+// isolateChild additionally puts the server JVM in a process group of its own.
+//
+// In a foreground run the supervisor shares the user's console, and a Ctrl-C
+// there is otherwise delivered to every process attached to that console,
+// java.exe included. The server must only ever be stopped through its console
+// "stop" command, so the JVM is kept out of the console's Ctrl-C delivery and
+// the supervisor decides what a signal means.
+func isolateChild(cmd *exec.Cmd) {
+	hideConsole(cmd)
+	cmd.SysProcAttr.CreationFlags |= createNewProcessGroup
+}

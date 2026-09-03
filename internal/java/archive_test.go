@@ -177,3 +177,46 @@ func TestFindJavaHome(t *testing.T) {
 		t.Error("findJavaHome should fail when there is no bin/java")
 	}
 }
+
+// TestExtractTarGzRejectsAbsoluteSymlink covers the case where the link
+// target is absolute: filepath.Join drops the leading separator, so the
+// relative-traversal check alone would let it through.
+func TestExtractTarGzRejectsAbsoluteSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need extra privileges on windows")
+	}
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "evil.tar.gz")
+
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for _, hdr := range []*tar.Header{
+		{Name: "jdk/lib/abs", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd", Mode: 0o777},
+		{Name: "jdk/lib/up", Typeflag: tar.TypeSymlink, Linkname: "../../../../escape", Mode: 0o777},
+		{Name: "jdk/lib/ok", Typeflag: tar.TypeSymlink, Linkname: "../release", Mode: 0o777},
+	} {
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.Close()
+	gz.Close()
+	f.Close()
+
+	dst := filepath.Join(dir, "out")
+	if err := extract(archive, dst); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"abs", "up"} {
+		if _, err := os.Lstat(filepath.Join(dst, "jdk", "lib", bad)); !os.IsNotExist(err) {
+			t.Errorf("symlink %q pointing outside the tree was created", bad)
+		}
+	}
+	if got, err := os.Readlink(filepath.Join(dst, "jdk", "lib", "ok")); err != nil || got != "../release" {
+		t.Errorf("in-tree symlink: got %q, %v", got, err)
+	}
+}

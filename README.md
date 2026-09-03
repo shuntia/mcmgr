@@ -9,8 +9,8 @@ macOS and Linux.
 ```
 mcmgr new                    # asks for anything it needs
 mcmgr mod add fabric-api sodium lithium
-mcmgr server launch
-mcmgr server attach
+mcmgr start                  # in the background
+mcmgr attach                 # open its console; Ctrl-D detaches
 ```
 
 - **Guided when you want it, scriptable when you don't.** `mcmgr new` asks for
@@ -48,13 +48,19 @@ mcmgr new survival --loader fabric --mc 1.21.4 --memory 4G
 mcmgr mod add -s survival fabric-api sodium lithium
 
 # Start it in the background and open its console.
-mcmgr server launch -s survival
-mcmgr server attach -s survival        # Ctrl-C detaches, server keeps running
+mcmgr start -s survival
+mcmgr attach -s survival               # Ctrl-C or Ctrl-D detaches, server keeps running
+
+# Or keep the console in this terminal, like running the jar by hand.
+mcmgr run -s survival                  # Ctrl-C stops it, Ctrl-D detaches
 
 # Later
-mcmgr server cmd -s survival say Restarting in 5 minutes
-mcmgr server stop -s survival
+mcmgr cmd -s survival say Restarting in 5 minutes
+mcmgr stop -s survival
 ```
+
+`start`, `stop`, `restart`, `run`, `attach`, `status`, `logs` and `cmd` are
+shortcuts for the same commands under `mcmgr server`.
 
 Inside a server directory the `-s` flag is unnecessary — mcmgr finds the server
 by walking up from the working directory.
@@ -191,12 +197,15 @@ of heap.
 
 ### Servers
 
+The everyday ones also work without the `server` prefix: `mcmgr stop` is
+`mcmgr server stop`.
+
 | Command | What it does |
 | --- | --- |
-| `server run` | Run in this terminal; Ctrl-C stops it cleanly |
+| `server run` | Console in this terminal; Ctrl-C stops it cleanly, Ctrl-D detaches |
 | `server launch` | Start in the background, detached from this shell |
-| `server attach` | Stream the console and send it commands |
-| `server stop` | Clean shutdown, escalating to a kill after the grace period |
+| `server attach` | Stream the console and send it commands; Ctrl-C or Ctrl-D detaches |
+| `server stop` | Send `stop` to the console and wait; only a server still running after `stop_timeout_secs` is killed |
 | `server restart` | Stop, then start again in the background |
 | `server kill` | Terminate immediately, without saving |
 | `server status` | Configuration and current state |
@@ -208,6 +217,12 @@ of heap.
 | `server forget <name>` | Drop from the registry, leaving files alone |
 | `server accept-eula` | Record acceptance of the Minecraft EULA |
 | `server set-jar <path>` | Point at a jar you installed yourself |
+
+`server run` starts the same detached supervisor as `launch` and attaches to
+it, so Ctrl-D hands the server off to the background and closing the terminal
+does not kill it. For a service manager such as systemd, which needs the
+process to stay in the foreground, pass `server run --foreground`; that is also
+what happens automatically when stdin is not a terminal.
 
 ### Mods
 
@@ -433,10 +448,17 @@ error: this change needs confirmation, but there is no terminal to ask on
 ```
 
 Warnings cover, among others: enabling the whitelist (you are not on it yet),
-disabling player verification, enabling RCON, hardcore mode, changing a world's
-Minecraft version or loader, changing the seed or world name of an existing
-world, and shutdown timeouts too short to finish a save. Severe ones require a
-confirmation, or `--yes` in a script.
+disabling the whitelist (anyone who finds the address can join), disabling
+player verification, enabling RCON, hardcore mode, changing a world's Minecraft
+version or loader, changing the seed or world name of an existing world, and
+shutdown timeouts too short to finish a save. Severe ones require a
+confirmation, or `--yes` in a script; the interactive editor names each setting
+the confirmation is about.
+
+Invalid values are refused where they are typed: a port outside 1-65535, a view
+distance the server would clamp, text where a number belongs. In the editor the
+value turns red with the reason underneath, and enter will not save until it is
+fixed.
 
 The Minecraft EULA is never accepted implicitly: `mcmgr new` asks, and
 `mcmgr server accept-eula` is the only other way to record it.
@@ -527,9 +549,12 @@ providers with `mcmgr mod search <query> --provider all`.
 
 ## How the background server works
 
-`server launch` re-executes mcmgr as a detached **supervisor** process that owns
-the JVM's stdin and stdout and listens on a loopback TCP port. Every other
-mcmgr invocation is a short-lived client of that port.
+`server launch` (and `server run`, unless `--foreground` is given) re-executes
+mcmgr as a detached **supervisor** process that owns the JVM's stdin and stdout
+and listens on a loopback TCP port. Every other mcmgr invocation, including the
+console `server run` shows, is a short-lived client of that port. That is why
+Ctrl-D can detach from it and closing the terminal does not take the server
+with it.
 
 That is what makes `attach`, `stop` and the running check behave identically
 everywhere: there is no reliance on job control, named pipes, screen or tmux.
@@ -539,6 +564,22 @@ drive the console.
 
 Console output is captured to `.mcmgr/console.log`, which is why `server logs`
 works on a stopped server, and the previous run is kept as `console.log.1`.
+
+### Stopping is always the `stop` command
+
+The JVM is never sent a signal to shut it down. `server stop`, Ctrl-C in
+`server run`, and a SIGTERM or SIGHUP delivered to the supervisor (a service
+manager stopping it, a `kill`, the terminal closing) all become the same thing:
+the word `stop` written to the server console, followed by waiting for the
+server to save and exit on its own. The JVM runs in its own process group so a
+terminal's Ctrl-C cannot reach it directly, and the supervisor stays up until
+the save is done.
+
+Only a server that is still running `stop_timeout_secs` after being asked
+(default 90) is killed, and `server kill` does so immediately on request. A
+second Ctrl-C or signal escalates to that kill as well, for a server that is
+wedged. Under systemd, set `KillMode=mixed` or `KillMode=process` so that
+only the supervisor receives the stop signal.
 
 ## Environment variables
 
@@ -556,8 +597,9 @@ works on a stopped server, and the previous run is kept as `console.log.1`.
 - Minecraft servers need a JVM. mcmgr uses `java` from `PATH` unless
   `java.path` is set in the manifest, `global.java_path` is set, or a runtime
   was installed with `mcmgr venv install`.
-- `server kill` terminates the supervisor and the JVM. If the supervisor is
-  killed by something else, the JVM can briefly outlive it; the next mcmgr
+- `server kill` terminates the supervisor and the JVM. A SIGTERM to the
+  supervisor is a clean stop, not a kill; only a SIGKILL takes it down without
+  stopping the server, in which case the JVM outlives it. The next mcmgr
   command detects the stale state and `server kill` cleans up the leftover
   process.
 - Quilt servers are managed for mods but must be installed with Quilt's own

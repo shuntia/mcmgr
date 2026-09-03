@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -81,24 +82,56 @@ func Launch(cfg *config.Config, opts Options) (*State, error) {
 		launchTimeout, logPath)
 }
 
+// AttachOptions controls how Attach behaves.
+type AttachOptions struct {
+	// Tail is how many lines of recent output to show first.
+	Tail int
+	// InterruptStops makes Ctrl-C stop the server (and a second Ctrl-C kill
+	// it) instead of detaching. This is what `server run` wants: the
+	// terminal behaves like a plain server console, while Ctrl-D still
+	// detaches and leaves the server running.
+	InterruptStops bool
+	// StopTimeout is the grace period passed with the stop request.
+	StopTimeout int
+}
+
+// ErrDetached is returned by Attach when the user detached rather than the
+// server exiting, so a caller that cares can tell the two apart.
+var ErrDetached = errors.New("detached")
+
 // Attach streams a running server's console and forwards typed lines to it.
-// Ctrl-C detaches without stopping the server, which is the whole point of
-// running detached in the first place.
-func Attach(live *Live, tail int) error {
+//
+// Ctrl-D always detaches without stopping the server, which is the whole
+// point of running detached in the first place. Ctrl-C detaches too, unless
+// InterruptStops is set, in which case it asks the server to stop.
+//
+// The exit code is the server's when it exited while attached; it is 0 on a
+// detach, with ErrDetached as the error.
+func Attach(live *Live, opts AttachOptions) (int, error) {
 	conn, err := Dial(live.State)
 	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
+		return 0, fmt.Errorf("connecting to server: %w", err)
 	}
 	defer conn.Close()
 
-	if err := conn.Send(Request{Token: live.State.Token, Op: OpAttach, Tail: tail}); err != nil {
-		return err
+	if err := conn.Send(Request{Token: live.State.Token, Op: OpAttach, Tail: opts.Tail}); err != nil {
+		return 0, err
 	}
 
-	fmt.Printf("%sattached to %s%s  %s(Ctrl-C or Ctrl-D detaches; the server keeps running)%s\n",
-		ui.Bold, live.State.Name, ui.Reset, ui.Dim, ui.Reset)
+	name := live.State.Name
+	if opts.InterruptStops {
+		fmt.Printf("%srunning %s%s  %s(Ctrl-C stops it; Ctrl-D detaches and leaves it running)%s\n",
+			ui.Bold, name, ui.Reset, ui.Dim, ui.Reset)
+	} else {
+		fmt.Printf("%sattached to %s%s  %s(Ctrl-C or Ctrl-D detaches; the server keeps running)%s\n",
+			ui.Bold, name, ui.Reset, ui.Dim, ui.Reset)
+	}
 
-	streamDone := make(chan error, 1)
+	type streamResult struct {
+		exited bool
+		code   int
+	}
+	streamDone := make(chan streamResult, 1)
 	go func() {
 		out := bufio.NewWriter(os.Stdout)
 		for {
@@ -106,7 +139,7 @@ func Attach(live *Live, tail int) error {
 			resp, err := conn.Recv()
 			if err != nil {
 				out.Flush()
-				streamDone <- err
+				streamDone <- streamResult{}
 				return
 			}
 			switch resp.Type {
@@ -115,12 +148,14 @@ func Attach(live *Live, tail int) error {
 				out.Flush()
 			case RespExit:
 				out.Flush()
-				streamDone <- fmt.Errorf("server exited with code %d", resp.Code)
+				streamDone <- streamResult{exited: true, code: resp.Code}
 				return
 			}
 		}
 	}()
 
+	// Typed lines go to the console. EOF on stdin, which is Ctrl-D at the
+	// start of a line, ends this goroutine and so detaches.
 	inputDone := make(chan struct{})
 	go func() {
 		defer close(inputDone)
@@ -134,30 +169,63 @@ func Attach(live *Live, tail int) error {
 				}
 			}
 			if err != nil {
-				return // Ctrl-D / EOF detaches
+				return
 			}
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt)
 	defer signal.Stop(sigCh)
 
-	select {
-	case err := <-streamDone:
-		if err != nil && strings.Contains(err.Error(), "server exited") {
-			fmt.Printf("\n%s%v%s\n", ui.Yellow, err, ui.Reset)
-			return nil
+	detach := func() (int, error) {
+		// Close first so the streaming goroutine stops before the notice is
+		// printed, rather than trailing a line after it.
+		conn.Close()
+		fmt.Printf("\n%sdetached; %s is still running%s\n", ui.Dim, name, ui.Reset)
+		if opts.InterruptStops {
+			fmt.Printf("%s  console:  mcmgr server attach -s %s\n  shutdown: mcmgr server stop -s %s%s\n",
+				ui.Dim, name, name, ui.Reset)
 		}
-		return nil
-	case <-sigCh:
-	case <-inputDone:
+		return 0, ErrDetached
 	}
-	// Close first so the streaming goroutine stops before the notice is
-	// printed, rather than trailing a line after it.
-	conn.Close()
-	fmt.Printf("\n%sdetached; server is still running%s\n", ui.Dim, ui.Reset)
-	return nil
+
+	interrupts := 0
+	for {
+		select {
+		case res := <-streamDone:
+			if !res.exited {
+				// The supervisor went away without an exit notice.
+				return 0, nil
+			}
+			colour := ui.Dim
+			if res.code != 0 {
+				colour = ui.Yellow
+			}
+			fmt.Printf("\n%s%s exited with code %d%s\n", colour, name, res.code, ui.Reset)
+			return res.code, nil
+
+		case <-inputDone:
+			return detach()
+
+		case <-sigCh:
+			if !opts.InterruptStops {
+				return detach()
+			}
+			interrupts++
+			if interrupts == 1 {
+				fmt.Fprintf(os.Stderr, "\n[mcmgr] interrupt: stopping %s cleanly (Ctrl-C again to force, Ctrl-D to detach)\n", name)
+				if err := conn.Send(Request{Token: live.State.Token, Op: OpStop, Timeout: opts.StopTimeout}); err != nil {
+					return 0, err
+				}
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[mcmgr] second interrupt: terminating %s\n", name)
+			if err := conn.Send(Request{Token: live.State.Token, Op: OpKill}); err != nil {
+				return 0, err
+			}
+		}
+	}
 }
 
 // Stop asks a running server to shut down. When wait is true it blocks until
