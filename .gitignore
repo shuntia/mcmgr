@@ -1,0 +1,7 @@
+# Build output
+/mcmgr
+/mcmgr.exe
+/dist/
+
+# Per-server runtime state, if a server is ever created inside the repo
+.mcmgr/
