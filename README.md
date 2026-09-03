@@ -540,6 +540,7 @@ In order:
 | `mcmgr.lock.json` | server directory | Exactly which mod versions are installed, with checksums. Generated, never hand-edited. Commit it for reproducible installs. |
 | `server.properties` | server directory | Minecraft's own settings. mcmgr preserves its comments and key order. |
 | `.mcmgr/` | server directory | Runtime state and captured console logs. Not worth committing. |
+| `.mcmgr.toml.lock` and friends | next to each file above | Empty lock files that serialise concurrent mcmgr invocations. Left in place on purpose; safe to ignore and not worth committing. |
 | `config.toml`, `servers.json` | user config dir | Machine-wide settings and the registry of known servers. |
 
 A manifest looks like this:
