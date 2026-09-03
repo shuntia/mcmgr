@@ -16,18 +16,65 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"mcmgr/internal/ui"
 )
 
+// fallbackVersion is the release this source tree is, used when the binary
+// carries no build information — a plain `go build` outside a repository.
+const fallbackVersion = "0.1.0"
+
+// Version is the mcmgr build, as reported by `mcmgr version` and sent in the
+// User-Agent. It is derived from the linker's build info so a bug report names
+// a commit rather than a constant nobody bumped.
+var Version = buildVersion(debug.ReadBuildInfo())
+
 // UserAgent identifies mcmgr to the APIs it calls. Modrinth requires a
 // descriptive agent and will rate-limit generic ones harder.
-const UserAgent = "mcmgr/" + Version + " (github.com/shuntia/mcmgr)"
+var UserAgent = "mcmgr/" + Version + " (github.com/shuntia/mcmgr)"
 
-// Version is the mcmgr release, also reported by `mcmgr version`.
-const Version = "0.1.0"
+// buildVersion formats the module version with the revision it was built from,
+// e.g. "0.1.0+9f3c1ab" or "0.1.0+9f3c1ab+dirty". It takes the build info as
+// arguments so the formatting is testable.
+func buildVersion(info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil {
+		return fallbackVersion
+	}
+
+	// Cut any build metadata the toolchain already appended, so it is not
+	// repeated below.
+	version, _, _ := strings.Cut(strings.TrimPrefix(info.Main.Version, "v"), "+")
+	// "(devel)" and a 0.0.0- pseudo-version are what a build from a working
+	// tree reports. Neither says more than the release the source claims to
+	// be, and the revision below is what actually identifies the build.
+	if version == "" || version == "(devel)" || strings.HasPrefix(version, "0.0.0-") {
+		version = fallbackVersion
+	}
+
+	var revision string
+	var dirty bool
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(revision) > 7 {
+		revision = revision[:7]
+	}
+	if revision != "" {
+		version += "+" + revision
+	}
+	if dirty {
+		version += "+dirty"
+	}
+	return version
+}
 
 var client = &http.Client{
 	Timeout: 10 * time.Minute, // generous: covers large jar downloads
