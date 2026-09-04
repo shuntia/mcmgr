@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"mcmgr/internal/config"
+	"mcmgr/internal/java"
+	"mcmgr/internal/mods"
 	"mcmgr/internal/prompt"
 	"mcmgr/internal/props"
 	"mcmgr/internal/server"
@@ -31,6 +33,12 @@ type newFlagValues struct {
 	noRegister *bool
 	noInput    *bool
 	javaArgs   stringList
+	// zgc is tri-state like whitelist: "" asks, "true"/"false" decides.
+	zgc *string
+	// recommended installs the pre-selected recommended add-ons; addons are
+	// extra ones named on the command line. Either given skips the prompt.
+	recommended *bool
+	addons      stringList
 }
 
 // register declares the flags shared by `mcmgr new` and `mcmgr server create`.
@@ -42,12 +50,16 @@ func (v *newFlagValues) register(fs *flag.FlagSet) {
 	v.memory = fs.String("memory", "", "heap size for the JVM, e.g. 4G")
 	v.javaPath = fs.String("java", "", "path to the java binary (default: java from PATH)")
 	v.port = fs.String("port", "", "server port (default 25565)")
-	v.whitelist = fs.String("whitelist", "", "enable the whitelist: true or false")
+	v.whitelist = fs.String("whitelist", "", "enable the whitelist: true or false (default true)")
 	v.onlineMode = fs.String("online-mode", "", "verify players against Mojang: true or false")
 	v.acceptEULA = fs.Bool("accept-eula", false, "accept the Minecraft EULA (https://aka.ms/MinecraftEULA)")
 	v.noRegister = fs.Bool("no-register", false, "do not add the server to the global registry")
 	v.noInput = fs.Bool("no-input", false, "never prompt; fail if a required value is missing")
 	fs.Var(&v.javaArgs, "java-arg", "extra JVM argument; repeatable")
+	v.zgc = fs.String("zgc", "", "run on the ZGC garbage collector: true or false (default true)")
+	v.recommended = fs.Bool("recommended", false,
+		"install the recommended server-side mods or plugins without asking")
+	fs.Var(&v.addons, "mod", "mod or plugin to install, as for 'mcmgr mod add'; repeatable")
 }
 
 func newCmd() *Command {
@@ -61,11 +73,16 @@ func newCmd() *Command {
 			"arrow keys, type to fill in text, and press enter to accept. Supply every flag\n" +
 			"(or pass --no-input) to run it unattended in a script.\n\n" +
 			"Settings that can lock you out or damage a world are explained before they are\n" +
-			"applied.",
+			"applied. The whitelist is on unless --whitelist=false is given, and the JVM\n" +
+			"runs on ZGC unless --zgc=false is given or --java-arg names a collector.\n\n" +
+			"On a platform that loads mods or plugins, a curated list of server-side ones\n" +
+			"is offered, and Modrinth can be searched for more; --recommended and --mod\n" +
+			"answer that without a prompt.",
 		Examples: []string{
 			"mcmgr new                                   # ask for everything",
 			"mcmgr new survival --loader fabric          # ask only for the rest",
 			"mcmgr new lobby --loader paper --mc 1.21.4 --memory 4G --accept-eula --no-input",
+			"mcmgr new smp --loader fabric --recommended --mod chunky --no-input",
 		},
 	}
 	cmd.Run = func(args []string) error { return runNew(cmd, "mcmgr new", args) }
@@ -193,6 +210,23 @@ func runNew(cmd *Command, path string, args []string) error {
 		}
 	}
 
+	// --- garbage collector -----------------------------------------------
+	// ZGC is recommended (see java.ZGCArgs for why). The offer depends on the
+	// Java that would run: ZGC is unknown to Java 8 and experimental before 15,
+	// and the flags differ by release, so that Java is detected first. A
+	// collector named in --java-arg is the user's decision and skips the
+	// question; --zgc=false skips it too.
+	gc := config.GCDefault
+	if !java.SelectsGC(v.javaArgs) {
+		useZGC, cerr := chooseZGC(v.zgc, interactive, *v.javaPath)
+		if cerr != nil {
+			return cerr
+		}
+		if useZGC {
+			gc = config.GCZGC
+		}
+	}
+
 	port := *v.port
 	if port == "" && interactive {
 		if port, err = prompt.Text("Port",
@@ -208,7 +242,9 @@ func runNew(cmd *Command, path string, args []string) error {
 	}
 
 	// --- whitelist -------------------------------------------------------
-	whitelist, err := askBool(v.whitelist, interactive, false,
+	// On by default: a fresh server is private until its owner decides
+	// otherwise, rather than open to anyone who finds the address.
+	whitelist, err := askBool(v.whitelist, interactive, true,
 		"Enable the whitelist? (recommended)",
 		"Recommended: only players you have added can join, which is the difference\n"+
 			"between a private server and one anyone who finds the address can enter.\n\n"+
@@ -246,6 +282,34 @@ func runNew(cmd *Command, path string, args []string) error {
 		}
 	}
 
+	// --- mods and plugins --------------------------------------------------
+	// Chosen before anything is built so every question is asked up front,
+	// and installed after, once there is a manifest to record them in.
+	var picks addonPicks
+	if loader.SupportsMods() {
+		if *v.recommended {
+			for _, slug := range recommendedSlugs(mods.RecommendedDefaults(loader)) {
+				picks.add(slug)
+			}
+		}
+		for _, slug := range v.addons {
+			picks.add(slug)
+		}
+		if !*v.recommended && len(v.addons) == 0 && interactive {
+			chosen, perr := pickRecommended(loader, nil)
+			if perr != nil {
+				return promptErr(perr)
+			}
+			for _, slug := range chosen {
+				picks.add(slug)
+			}
+			filter := mods.FilterFor(&config.Config{Minecraft: version, Loader: loader}, mods.Channels{})
+			if perr := searchAndPick(filter, loader, &picks); perr != nil {
+				return promptErr(perr)
+			}
+		}
+	}
+
 	// --- build it ---------------------------------------------------------
 	jvm := append([]string{}, v.javaArgs...)
 	if memory != "" {
@@ -256,7 +320,7 @@ func runNew(cmd *Command, path string, args []string) error {
 		Name:       name,
 		Minecraft:  version,
 		Loader:     loader,
-		Java:       config.Java{Path: *v.javaPath, Args: jvm},
+		Java:       config.Java{Path: *v.javaPath, Args: jvm, GC: gc},
 		ServerArgs: []string{"nogui"},
 		Mods:       []config.ModSpec{},
 	})
@@ -308,8 +372,27 @@ func runNew(cmd *Command, path string, args []string) error {
 		}
 	}
 
+	// Add-ons are installed last, so a failure here leaves a usable server
+	// that is only missing a mod, and the summary can say which.
+	failed, ierr := installAddons(cfg, picks.slugs, mods.ChannelsFrom(cfg.Defaults), false, interactive)
+	if ierr != nil {
+		return ierr
+	}
+
 	ui.Ok("created %s in %s", name, cfg.Dir())
 	summariseNew(cfg, whitelist, onlineMode, port)
+	if gc == config.GCZGC {
+		field("gc", "ZGC")
+	}
+	if len(picks.slugs) > 0 {
+		field(loader.ContentNoun()+"s", "%d installed", len(picks.slugs)-len(failed))
+	}
+	if len(failed) > 0 {
+		ui.Warn("%d %s(s) could not be installed: %s\n"+
+			"       retry later with:  mcmgr mod add %s -s %s",
+			len(failed), loader.ContentNoun(), strings.Join(failed, ", "),
+			strings.Join(failed, " "), name)
+	}
 
 	// Warnings are printed after the summary so they are the last thing read.
 	var post []warn.Warning
@@ -326,10 +409,15 @@ func runNew(cmd *Command, path string, args []string) error {
 		fmt.Printf("  mcmgr server accept-eula -s %s   %s# required before the server will start%s\n",
 			name, ui.Dim, ui.Reset)
 	}
-	if loader.SupportsMods() {
-		fmt.Printf("  mcmgr mod add %s -s %s\n", exampleAddon(loader), name)
+	if loader.SupportsMods() && len(picks.slugs) == 0 {
+		fmt.Printf("  mcmgr mod recommend -s %s   %s# pick from a curated list, or: mcmgr mod add %s%s\n",
+			name, ui.Dim, exampleAddon(loader), ui.Reset)
 	}
 	fmt.Printf("  mcmgr server launch -s %s\n", name)
+	if whitelist {
+		fmt.Printf("  mcmgr server cmd whitelist add <your-username> -s %s   %s# once it is running%s\n",
+			name, ui.Dim, ui.Reset)
+	}
 	return nil
 }
 
@@ -354,6 +442,39 @@ func onOff(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// chooseZGC decides whether a new server runs on ZGC. Only the choice is
+// recorded; the flags are built at launch (server.JVMArgs) for whichever Java
+// runs then. javaPath is the --java flag; empty means the global setting or
+// java from PATH, as at launch.
+//
+// When no Java can be found yet (it may be installed by `mcmgr venv` later),
+// the question is still asked. When the Java found is too old for ZGC, the
+// question is skipped, and an explicit --zgc=true is an error rather than a
+// choice that would silently do nothing.
+func chooseZGC(flagValue *string, interactive bool, javaPath string) (bool, error) {
+	bin := (&config.Config{Java: config.Java{Path: javaPath}}).JavaBin()
+	info, derr := java.Detect(bin)
+	if derr == nil && !java.SupportsZGC(info.Major) {
+		if flagValue != nil && *flagValue != "" {
+			if b, perr := strconv.ParseBool(*flagValue); perr == nil && b {
+				return false, fmt.Errorf("--zgc: %s is Java %d, but ZGC needs Java 15 or newer",
+					info.Path, info.Major)
+			}
+		}
+		return false, nil
+	}
+	use, err := askBool(flagValue, interactive, true,
+		"Run on ZGC? (recommended)",
+		"Recommended. Minecraft is latency-bound: a tick has 50 ms, and a pause from\n"+
+			"the JVM's default collector on a multi-gigabyte heap is felt as lag by every\n"+
+			"player at once. ZGC keeps pauses under a millisecond at any heap size, for a\n"+
+			"little throughput a server does not miss. Java 15 or newer.")
+	if err != nil {
+		return false, promptErr(err)
+	}
+	return use, nil
 }
 
 // askBool resolves a tri-state flag: an explicit --flag=value wins, otherwise
@@ -406,7 +527,7 @@ func suggestName() string {
 // of wrapped errors.
 func promptErr(err error) error {
 	if errors.Is(err, prompt.ErrAborted) {
-		return fmt.Errorf("cancelled; nothing was changed")
+		return errCancelled
 	}
 	if errors.Is(err, prompt.ErrNotInteractive) {
 		return fmt.Errorf("%w\n       pass the value as a flag, or run this in a terminal", err)

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -71,81 +72,107 @@ func upgradeCmd() *Command {
 				return err
 			}
 		}
-		if target == cfg.Minecraft {
-			ui.Info("%s is already on Minecraft %s", cfg.Name, target)
-			return nil
-		}
-
-		ui.Step("checking which add-ons have a build for %s", target)
-		ch := channels.resolve(fs, cfg)
-		plan, err := env.PlanUpgrade(target, ch)
-		if err != nil {
-			return err
-		}
-		printUpgradePlan(cfg, plan)
-
-		// Only the world warning applies here. The generic "your mods are for
-		// the old version" caution is left out on purpose: the plan above
-		// already says exactly what happens to each one, which is better
-		// information than a count.
-		p, _ := props.Load(cfg.Dir())
-		ctx := warn.Context{Dir: cfg.Dir(), Old: cfg.Minecraft}
-		if p != nil {
-			ctx.LevelName = p.GetOr("level-name", "world")
-		}
-		danger := warn.PrintAll(warn.ForManifest("minecraft", target, ctx))
-
-		if *dryRun {
-			ui.Info("dry run: nothing was changed")
-			return nil
-		}
-
-		if !*yes {
-			question := fmt.Sprintf("Upgrade %s from %s to %s?", cfg.Name, cfg.Minecraft, target)
-			if !prompt.Interactive() {
-				return fmt.Errorf("this upgrade needs confirmation, but there is no terminal to ask on\n" +
-					"       re-run with --yes, or --dry-run to see the plan first")
-			}
-			ok, cerr := prompt.Confirm(question, upgradeConfirmBody(plan, danger), false)
-			if cerr != nil {
-				return promptErr(cerr)
-			}
-			if !ok {
-				return fmt.Errorf("cancelled; nothing was changed")
-			}
-		}
-
-		// The server binary first: if this fails, the manifest is untouched and
-		// the server still starts on its old version.
-		previous, previousLoaderVer := cfg.Minecraft, cfg.LoaderVer
-		cfg.Minecraft = target
-		cfg.LoaderVer = "" // let the loader resolve a build for the new version
-
-		ui.Step("installing the %s server for %s", cfg.Loader, target)
-		if err := server.Install(cfg, server.InstallOptions{}); err != nil {
-			cfg.Minecraft, cfg.LoaderVer = previous, previousLoaderVer
-			return fmt.Errorf("%w\n\n       nothing was changed; %s is still on %s",
-				err, cfg.Name, previous)
-		}
-		_ = server.RecordJavaRequirement(cfg)
-		if err := cfg.Save(); err != nil {
-			return err
-		}
-
-		ui.Step("refetching add-ons for %s", target)
-		if err := env.ApplyUpgrade(plan, ch); err != nil {
-			return err
-		}
-
-		ui.Ok("%s upgraded from %s to %s", cfg.Name, previous, target)
-		if left := plan.StillDeclared(); len(left) > 0 {
-			ui.Info("       still declared but not installed: %s", strings.Join(left, ", "))
-			ui.Info("       run 'mcmgr mod sync' later to pick them up when builds appear")
-		}
-		ui.Info("       back up the world before the first start if you have not already")
-		return nil
+		return runUpgrade(cfg, env, target, channels.resolve(fs, cfg),
+			upgradeOptions{dryRun: *dryRun, yes: *yes})
 	}
 	return cmd
+}
+
+// errCancelled is what a declined confirmation turns into: a clean message
+// rather than a stack of wrapped errors, and something callers can test for.
+var errCancelled = errors.New("cancelled; nothing was changed")
+
+// upgradeOptions tunes runUpgrade for its two callers: the upgrade command,
+// and the offer made when a mod has no build for the current version.
+type upgradeOptions struct {
+	dryRun bool
+	yes    bool
+	// reason, when set, is why the move is being proposed, and goes into the
+	// confirmation so it reads "upgrade ... so that Lithium can be installed".
+	reason string
+}
+
+// runUpgrade moves a server to another Minecraft version: it works out and
+// shows the plan for every add-on, warns about the world, confirms, then
+// reinstalls the server binary and refetches the add-ons. env must be open on
+// cfg, and is left on the new version.
+func runUpgrade(cfg *config.Config, env *mods.Env, target string, ch mods.Channels, opts upgradeOptions) error {
+	if target == cfg.Minecraft {
+		ui.Info("%s is already on Minecraft %s", cfg.Name, target)
+		return nil
+	}
+
+	ui.Step("checking which add-ons have a build for %s", target)
+	plan, err := env.PlanUpgrade(target, ch)
+	if err != nil {
+		return err
+	}
+	printUpgradePlan(cfg, plan)
+
+	// Only the world warning applies here. The generic "your mods are for
+	// the old version" caution is left out on purpose: the plan above
+	// already says exactly what happens to each one, which is better
+	// information than a count.
+	p, _ := props.Load(cfg.Dir())
+	ctx := warn.Context{Dir: cfg.Dir(), Old: cfg.Minecraft}
+	if p != nil {
+		ctx.LevelName = p.GetOr("level-name", "world")
+	}
+	danger := warn.PrintAll(warn.ForManifest("minecraft", target, ctx))
+
+	if opts.dryRun {
+		ui.Info("dry run: nothing was changed")
+		return nil
+	}
+
+	if !opts.yes {
+		verb := "Upgrade"
+		if mods.CompareMC(target, cfg.Minecraft) < 0 {
+			verb = "Downgrade"
+		}
+		question := fmt.Sprintf("%s %s from %s to %s?", verb, cfg.Name, cfg.Minecraft, target)
+		if !prompt.Interactive() {
+			return fmt.Errorf("this upgrade needs confirmation, but there is no terminal to ask on\n" +
+				"       re-run with --yes, or --dry-run to see the plan first")
+		}
+		ok, cerr := prompt.Confirm(question, upgradeConfirmBody(plan, danger, opts.reason), false)
+		if cerr != nil {
+			return promptErr(cerr)
+		}
+		if !ok {
+			return errCancelled
+		}
+	}
+
+	// The server binary first: if this fails, the manifest is untouched and
+	// the server still starts on its old version.
+	previous, previousLoaderVer := cfg.Minecraft, cfg.LoaderVer
+	cfg.Minecraft = target
+	cfg.LoaderVer = "" // let the loader resolve a build for the new version
+
+	ui.Step("installing the %s server for %s", cfg.Loader, target)
+	if err := server.Install(cfg, server.InstallOptions{}); err != nil {
+		cfg.Minecraft, cfg.LoaderVer = previous, previousLoaderVer
+		return fmt.Errorf("%w\n\n       nothing was changed; %s is still on %s",
+			err, cfg.Name, previous)
+	}
+	_ = server.RecordJavaRequirement(cfg)
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+
+	ui.Step("refetching add-ons for %s", target)
+	if err := env.ApplyUpgrade(plan, ch); err != nil {
+		return err
+	}
+
+	ui.Ok("%s moved from %s to %s", cfg.Name, previous, target)
+	if left := plan.StillDeclared(); len(left) > 0 {
+		ui.Info("       still declared but not installed: %s", strings.Join(left, ", "))
+		ui.Info("       run 'mcmgr mod sync' later to pick them up when builds appear")
+	}
+	ui.Info("       back up the world before the first start if you have not already")
+	return nil
 }
 
 // printUpgradePlan shows every add-on's fate before anything is changed.
@@ -210,8 +237,11 @@ func printUpgradePlan(cfg *config.Config, plan *mods.UpgradePlan) {
 
 // upgradeConfirmBody summarises the consequences inside the confirmation
 // prompt, where anything printed to stderr would already have scrolled away.
-func upgradeConfirmBody(plan *mods.UpgradePlan, danger bool) string {
+func upgradeConfirmBody(plan *mods.UpgradePlan, danger bool, reason string) string {
 	var b strings.Builder
+	if reason != "" {
+		fmt.Fprintf(&b, "%s\n\n", strings.ToUpper(reason[:1])+reason[1:])
+	}
 	if blocked := plan.Blocked(); len(blocked) > 0 {
 		names := make([]string, len(blocked))
 		for i, e := range blocked {

@@ -312,3 +312,99 @@ func ValidateName(s string) error {
 	}
 	return nil
 }
+
+// MultiSelect asks the user to tick any number of options. Space toggles,
+// enter accepts; selected lists the values ticked when the prompt opens. It
+// returns the chosen values in the order the options were given.
+func MultiSelect(title, description string, options []Option, selected []string) ([]string, error) {
+	if !Interactive() {
+		return nil, ErrNotInteractive
+	}
+	if len(options) == 0 {
+		return nil, fmt.Errorf("no options to choose from")
+	}
+
+	pre := make(map[string]bool, len(selected))
+	for _, s := range selected {
+		pre[s] = true
+	}
+	if Accessible() {
+		return multiSelectAccessible(title, description, options, pre)
+	}
+	opts := make([]huh.Option[string], len(options))
+	for i, o := range options {
+		opts[i] = huh.NewOption(o.Label, o.Value).Selected(pre[o.Value])
+	}
+
+	var value []string
+	field := huh.NewMultiSelect[string]().
+		Title(title).
+		Options(opts...).
+		Filterable(true).
+		Height(multiSelectHeight(len(options))).
+		Value(&value)
+	if description != "" {
+		field = field.Description(description)
+	}
+	if err := run(field); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+// multiSelectAccessible is the line-based form of MultiSelect: the options are
+// numbered, each line typed toggles one, and an empty line or 0 finishes.
+//
+// It is hand-rolled rather than huh's own accessible multi-select because that
+// one reads several lines from its input, and the one-line ration every other
+// accessible prompt gets would end it after the first toggle.
+func multiSelectAccessible(title, description string, options []Option, selected map[string]bool) ([]string, error) {
+	fmt.Println(title)
+	if description != "" {
+		fmt.Println(description)
+	}
+	fmt.Println("Type a number to tick or untick it; press enter on an empty line when done.")
+	for {
+		for i, o := range options {
+			mark := " "
+			if selected[o.Value] {
+				mark = "x"
+			}
+			fmt.Printf("%2d. [%s] %s\n", i+1, mark, o.Label)
+		}
+		fmt.Print("Toggle (1-", len(options), ") or enter to finish: ")
+		line, err := stdinReader.ReadString('\n')
+		if err != nil && line == "" {
+			fmt.Println()
+			return nil, fmt.Errorf("%w: input ended before the prompt was answered", ErrNotInteractive)
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || line == "0" {
+			break
+		}
+		n, err := strconv.Atoi(line)
+		if err != nil || n < 1 || n > len(options) {
+			fmt.Printf("enter a number between 1 and %d\n", len(options))
+			continue
+		}
+		v := options[n-1].Value
+		selected[v] = !selected[v]
+	}
+	var out []string
+	for _, o := range options {
+		if selected[o.Value] {
+			out = append(out, o.Value)
+		}
+	}
+	return out, nil
+}
+
+// multiSelectHeight keeps a long list from scrolling the title off screen. It
+// is rows of options, and the field adds its own for the title and help.
+func multiSelectHeight(n int) int {
+	const max = 12
+	if n > max {
+		return max
+	}
+	return n
+}

@@ -218,8 +218,16 @@ func (f *fakeProvider) Project(idOrSlug string) (*Project, error) {
 	return nil, fmt.Errorf("no project %q", idOrSlug)
 }
 
-func (f *fakeProvider) Versions(projectID string, _ Filter) ([]Version, error) {
-	return f.byProject[projectID], nil
+// Versions honours the filter the way the real providers do, so a version
+// tagged for other Minecraft versions is absent from a filtered listing.
+func (f *fakeProvider) Versions(projectID string, filter Filter) ([]Version, error) {
+	var out []Version
+	for _, v := range f.byProject[projectID] {
+		if v.matches(filter) {
+			out = append(out, v)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeProvider) Version(id string) (*Version, error) {

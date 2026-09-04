@@ -44,6 +44,17 @@ type Project struct {
 // installing it server-side is at best useless and at worst a crash on start.
 func (p Project) ClientOnly() bool { return p.ServerSide == "unsupported" }
 
+// NeedsClient reports whether every player must install the project too, which
+// is what a required client side means. Such a mod is not server-side: it
+// works only for players who have it, and can refuse those who do not.
+func (p Project) NeedsClient() bool { return p.ClientSide == "required" }
+
+// ServerSideOnly reports whether a project runs on the server without players
+// installing anything, which is the only kind offered by the guided flows.
+// Providers that do not publish either flag pass, since there is nothing to
+// refuse on.
+func (p Project) ServerSideOnly() bool { return !p.ClientOnly() && !p.NeedsClient() }
+
 // Dependency is another project a version needs.
 type Dependency struct {
 	ProjectID string
@@ -151,6 +162,9 @@ var overrides map[string]Provider
 // which needs no credentials.
 func Get(name string) (Provider, error) {
 	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		key = ProviderModrinth
+	}
 	if p, ok := overrides[key]; ok {
 		return p, nil
 	}
@@ -213,6 +227,78 @@ func pickBest(versions []Version, f Filter) (*Version, error) {
 // errNoCompatible is returned when nothing matches the server's Minecraft
 // version and loader.
 var errNoCompatible = errors.New("no compatible version found")
+
+// NoBuildError reports that a project has no build for the server's Minecraft
+// version, and says which versions it does have builds for on this loader, so
+// the caller can offer to move the server rather than just give up.
+type NoBuildError struct {
+	Name      string
+	Slug      string
+	Loader    string
+	Minecraft string
+	// Supported lists full releases with a build for this loader, newest
+	// first. It is empty when the project has builds for no release at all,
+	// or when looking them up failed.
+	Supported []string
+}
+
+func (e *NoBuildError) Error() string {
+	msg := fmt.Sprintf("%s has no release for %s %s", e.Name, e.Loader, e.Minecraft)
+	if len(e.Supported) == 0 {
+		return msg
+	}
+	newer, older := e.Nearest()
+	msg += fmt.Sprintf("\n       it does have builds for %s", strings.Join(e.Nearby(6), ", "))
+	switch {
+	case newer != "":
+		msg += fmt.Sprintf("\n       move this server with:  mcmgr upgrade %s   (then re-run this command)", newer)
+	case older != "":
+		msg += fmt.Sprintf("\n       move this server with:  mcmgr upgrade %s   (then re-run this command)"+
+			"\n       that is a downgrade: a world already played on %s will not load", older, e.Minecraft)
+	}
+	return msg
+}
+
+// Is lets errors.Is(err, errNoCompatible) keep matching, for callers that only
+// care that nothing fitted.
+func (e *NoBuildError) Is(target error) bool { return target == errNoCompatible }
+
+// Nearest is the supported version just above the server's, and the one just
+// below it. Either is empty when there is nothing on that side.
+func (e *NoBuildError) Nearest() (newer, older string) {
+	return Nearest(e.Minecraft, e.Supported)
+}
+
+// Nearby lists up to n supported versions closest to the server's, oldest
+// first, so a long list such as a library's reads as "the ones around yours"
+// rather than a wall of history.
+func (e *NoBuildError) Nearby(n int) []string {
+	all := SortReleases(e.Supported) // newest first
+	var above, below []string
+	for _, v := range all {
+		if CompareMC(v, e.Minecraft) > 0 {
+			above = append(above, v)
+		} else {
+			below = append(below, v)
+		}
+	}
+	half := n / 2
+	if len(above) > half {
+		above = above[len(above)-half:] // the ones nearest to current
+	}
+	if len(below) > n-len(above) {
+		below = below[:n-len(above)]
+	}
+	// above is newest first; reverse into ascending order and put below first.
+	out := make([]string, 0, len(above)+len(below))
+	for i := len(below) - 1; i >= 0; i-- {
+		out = append(out, below[i])
+	}
+	for i := len(above) - 1; i >= 0; i-- {
+		out = append(out, above[i])
+	}
+	return out
+}
 
 // errUnstableOnly identifies the "only pre-release builds exist" case for
 // errors.Is, while UnstableOnlyError carries which channels were involved.

@@ -2,8 +2,10 @@ package prompt
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -179,5 +181,39 @@ func TestInteractiveRespectsNoInput(t *testing.T) {
 	t.Setenv("MCMGR_NO_INPUT", "1")
 	if Interactive() {
 		t.Error("MCMGR_NO_INPUT must switch prompting off")
+	}
+}
+
+// TestMultiSelectAccessible drives the line-based tick list: numbers toggle,
+// a bad number is refused, and an empty line finishes. The result keeps the
+// option order, not the order things were ticked in.
+func TestMultiSelectAccessible(t *testing.T) {
+	t.Setenv("MCMGR_ACCESSIBLE", "1")
+	t.Setenv("MCMGR_NO_INPUT", "")
+	old := stdinReader
+	stdinReader = bufio.NewReader(strings.NewReader("3\n9\n1\n2\n\nleftover\n"))
+	defer func() { stdinReader = old }()
+
+	opts := []Option{Opt("a"), Opt("b"), Opt("c")}
+	got, err := MultiSelect("Pick", "", opts, []string{"b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// b was pre-ticked and toggled off; a and c were toggled on.
+	if !slices.Equal(got, []string{"a", "c"}) {
+		t.Errorf("MultiSelect = %v, want [a c]", got)
+	}
+	// The prompt must stop at its empty line and leave the rest for whoever
+	// asks next, the way lineFeeder does for the other prompts.
+	rest, _ := stdinReader.ReadString('\n')
+	if rest != "leftover\n" {
+		t.Errorf("consumed past the empty line; next line is %q", rest)
+	}
+
+	// Input running out before the prompt is answered is an error, not a
+	// silent "nothing selected".
+	stdinReader = bufio.NewReader(strings.NewReader(""))
+	if _, err := MultiSelect("Pick", "", opts, nil); !errors.Is(err, ErrNotInteractive) {
+		t.Errorf("on EOF got %v, want ErrNotInteractive", err)
 	}
 }

@@ -7,7 +7,7 @@ background, attach to its console, and stop it — from one command, on Windows,
 macOS and Linux.
 
 ```
-mcmgr new                    # asks for anything it needs
+mcmgr new                    # asks for anything it needs, and offers recommended mods
 mcmgr mod add fabric-api sodium lithium
 mcmgr start                  # in the background
 mcmgr attach                 # open its console; Ctrl-D detaches
@@ -17,6 +17,11 @@ mcmgr attach                 # open its console; Ctrl-D detaches
   whatever you did not pass as a flag; supply every flag and it runs unattended.
 - **Actually cross-platform.** The same commands, the same config file and the
   same background-server behaviour on all three operating systems.
+- **Private by default.** A new server has the whitelist on; the setup says how
+  to add yourself, and `--whitelist=false` turns it off.
+- **A sensible mod list from the start.** Setup offers a short, curated list of
+  server-side mods or plugins for the platform you chose, and lets you search
+  Modrinth for more, before the server first starts.
 - **Mods are never swapped under a live server.** Every command that writes to
   the mods directory refuses to run while the server is up.
 - **Dangerous settings explain themselves.** Turning off player verification or
@@ -41,11 +46,12 @@ Put the binary somewhere on your `PATH`.
 ## Quick start
 
 ```bash
-# Create a server. Anything you leave out is asked for.
+# Create a server. Anything you leave out is asked for, including which of the
+# recommended mods to install; the whitelist is on unless you say otherwise.
 mcmgr new survival --loader fabric --mc 1.21.4 --memory 4G
 
-# Install mods. Required dependencies come along automatically.
-mcmgr mod add -s survival fabric-api sodium lithium
+# Install more mods. Required dependencies come along automatically.
+mcmgr mod add -s survival sodium lithium
 
 # Start it in the background and open its console.
 mcmgr start -s survival
@@ -219,6 +225,35 @@ warning: this server needs Java 25, but it was started with Java 21
 The same applies to an unaccepted EULA, a port already in use, and running out
 of heap.
 
+### Garbage collector
+
+`mcmgr new` puts a server on **ZGC** unless told otherwise, and `mcmgr doctor`
+points out one that is not. Minecraft is latency-bound: a tick has 50 ms, and
+a pause from the JVM's default collector (G1) on a multi-gigabyte heap is felt
+as lag by every player at once. ZGC keeps pauses under a millisecond at any
+heap size, for a little throughput a server does not miss.
+
+The manifest records only the choice, as `gc = "zgc"` under `[java]`. The
+flags that make it happen depend on the Java release, and the Java under a
+server can change (`mcmgr venv install`), so they are built at every launch
+for the Java that actually runs; `mcmgr server status` shows the result:
+
+| Java | Flags |
+| --- | --- |
+| 8–14 | none; ZGC does not exist there, and `mcmgr new` skips the question |
+| 15–20 | `-XX:+UseZGC` |
+| 21–22 | `-XX:+UseZGC -XX:+ZGenerational` (generational mode is opt-in here) |
+| 23+ | `-XX:+UseZGC` (generational is the default, and the only mode from 24) |
+
+To keep the JVM default pass `--zgc=false`. A collector named in `java.args`
+or with `--java-arg` (say `-XX:+UseG1GC`) always wins over `gc`, which makes
+`mcmgr server run --java-arg -XX:+UseG1GC` a way to compare for one run. An
+existing server switches with a setting, from the next start:
+
+```bash
+mcmgr config set java.gc zgc
+```
+
 ### Servers
 
 The everyday ones also work without the `server` prefix: `mcmgr stop` is
@@ -260,7 +295,115 @@ what happens automatically when stdin is not a terminal.
 | `mod update [mod]...` | Update to the newest compatible versions (`--dry-run` to preview) |
 | `mod sync [--prune]` | Make the mods directory match `mcmgr.toml` |
 | `mod search <query>` | Search, filtered to this server's version and loader |
+| `mod recommend` | Pick from a curated list of server-side mods or plugins, then search for more |
 | `mod info <mod>` | Details and recent versions |
+
+### Recommended mods and plugins
+
+Knowing which mods a server *should* have is the part a newcomer cannot search
+for, so mcmgr carries a short, curated list per platform. `mcmgr new` offers it
+as a tick list once the platform is chosen, and `mcmgr mod recommend` does the
+same for a server that already exists:
+
+```
+Recommended plugins
+  Well-known server-side plugins worth having from the start. The ticked ones
+  change no gameplay and are safe on any server.
+
+  > [x] LuckPerms          permissions; most other plugins expect one to be installed
+    [x] EssentialsX        homes, warps, kits, /tp and the other everyday commands
+    [x] CoreProtect        logs every block change so griefing can be rolled back
+    [ ] VaultUnlocked      the bridge plugins use to share economy and permissions
+    [ ] WorldGuard         protected regions and per-area rules
+    [ ] GriefPrevention    land claims players manage themselves
+    [ ] Multiverse-Core    several worlds on one server
+    [ ] PlaceholderAPI     the placeholders other plugins use in chat, tab and scoreboards
+    [ ] DiscordSRV         bridges in-game chat with a Discord channel
+    [ ] GrimAC             anti-cheat
+    [ ] WorldEdit          in-game building and terrain tools
+    [ ] TabTPS             TPS and tick time in the tab list
+    ...
+```
+
+Every entry is **strictly server-side**: its author marks it as running on the
+server and as not needing every player to install it too. Mods that need a
+client half, however popular, are left out, because a server-side list is for
+things that work for whoever connects. The test suite re-checks each entry
+against Modrinth.
+
+The picks follow what the community lists for server operators agree on: the
+Fabric wiki's established server-side mods, the fabric-serverside-mods lists,
+and the Paper and NeoForge server guides.
+
+| Platform | Pre-ticked | Also offered |
+| --- | --- | --- |
+| Fabric, Quilt | Fabric API, Lithium, FerriteCore, Krypton, ModernFix | Noisium, Alternate Current, ServerCore, Essential Commands, Ledger, Flan, Universal Graves, WorldEdit, LuckPerms, spark, TabTPS, Chunky, BlueMap, ViaVersion, Geyser |
+| NeoForge | Lithium, FerriteCore, ModernFix | Noisium, Alternate Current, ServerCore, AI Improvements, Flan, WorldEdit, LuckPerms, spark, TabTPS, Chunky, BlueMap, Geyser |
+| Paper | LuckPerms, EssentialsX, CoreProtect | VaultUnlocked, WorldGuard, GriefPrevention, Multiverse-Core, PlaceholderAPI, DiscordSRV, GrimAC, WorldEdit, TabTPS, Chunky, BlueMap, ViaVersion, Geyser |
+
+Nothing pre-ticked changes gameplay. spark is not offered on Paper because
+recent Paper builds bundle it.
+
+After the list, the same flow searches Modrinth for anything it does not
+cover, one query at a time, filtered to the server's version and loader. Pick
+a result or "none of these", and leave the query empty to finish. Results that
+are not strictly server-side — client-only, or needing every player to install
+them — are hidden rather than offered and then refused; `mod search` shows the
+same projects with a marker instead.
+
+Add-ons that cannot be installed are reported by name and skipped, so one of
+them never costs the rest. The usual reason is a mod with no build for that
+Minecraft version, and that case gets an offer instead of a dead end; see
+below.
+
+### A mod with no build for your version
+
+When a mod has no build for the server's Minecraft version, mcmgr looks up the
+versions it does support and says so, naming the nearest one:
+
+```
+$ mcmgr mod add modernfix
+error: ModernFix has no release for fabric 1.21.2
+       it does have builds for 1.20.4, 1.20.5, 1.20.6, 1.21, 1.21.1, 1.21.4
+       move this server with:  mcmgr upgrade 1.21.4   (then re-run this command)
+```
+
+In a terminal it offers to make that move on the spot. The move is the same as
+`mcmgr upgrade`: the plan for every other installed add-on is shown, the world
+warning applies, and nothing changes until you confirm. Once the server is on
+the new version the install is retried there. This works from `mod add`,
+`mod recommend` and `mcmgr new` alike.
+
+```
+$ mcmgr mod add modernfix
+ModernFix has no build for fabric 1.21.2, but it does for 1.20.4, 1.20.5, 1.20.6, 1.21, 1.21.1, 1.21.4
+-> checking which add-ons have a build for 1.21.4
+mid: Minecraft 1.21.2 -> 1.21.4
+NAME     INSTALLED               AFTER UPGRADE           STATUS
+lithium  mc1.21.3-0.14.6-fabric  mc1.21.4-0.15.3-fabric  will update
+  1 ready
+Upgrade mid from 1.21.2 to 1.21.4?  [Yes / No]
+-> installing the fabric server for 1.21.4
+-> refetching add-ons for 1.21.4
++ Lithium mc1.21.3-0.14.6-fabric -> mc1.21.4-0.15.3-fabric
++ mid moved from 1.21.2 to 1.21.4
+-> installing ModernFix 5.20.3+mc1.21.4
++ done; run 'mcmgr server restart' to load the changes
+```
+
+The nearest **newer** version is preferred, because a world can always be
+brought forward. A downgrade is offered only while the server has no world
+yet: a world already played on a newer version does not load on an older one,
+so in that case the versions are listed and the choice is left to you.
+
+Scripts get the same without a prompt:
+
+```bash
+mcmgr new smp --loader fabric --recommended --mod chunky --no-input   # the pre-ticked set, plus chunky
+mcmgr mod recommend --list                 # print the list for this server
+mcmgr mod recommend --install              # install the pre-ticked set
+mcmgr mod recommend --install --all        # install everything on the list
+```
 
 ### Upgrading
 
@@ -313,6 +456,11 @@ error: Sodium is a client-only mod
 *required dependency* that is client-only is installed with a warning rather
 than refused — declining it would break the mod that asked for it. CurseForge
 does not publish this distinction, so the check only applies to Modrinth.
+
+The opposite case is marked too: a mod whose author says every player must
+install it as well shows as *needs every player to install it* in `mod search`.
+It is not refused, since it does run on a server, but it is not server-side
+either, and the guided flows in `mcmgr new` and `mod recommend` leave it out.
 
 A mod can be named several ways:
 
@@ -459,6 +607,13 @@ prompts mix freely: pass `--loader fabric` and you will not be asked about the
 loader. Navigate with the arrow keys, type to fill in text, press enter to
 accept.
 
+`mcmgr new` asks, in order: name, directory, platform, Minecraft version,
+memory, whether to run on ZGC (recommended, see [Garbage
+collector](#garbage-collector)), port, whitelist (on by default), online mode,
+the EULA, and then which recommended mods or plugins to install and whether to
+search for more. Passing `--recommended` or `--mod` answers the last of those
+without a prompt.
+
 To run either unattended, pass every value as a flag, or add `--no-input` to
 turn a missing value into an error rather than a prompt. Prompting is also
 skipped automatically when stdin is not a terminal, so scripts never hang.
@@ -560,6 +715,7 @@ restart_on_crash = false
 
 [java]
 args = ["-Xmx4G"]
+gc = "zgc"
 
 [defaults]
 allow_beta = false

@@ -7,6 +7,7 @@ import (
 
 	"mcmgr/internal/config"
 	"mcmgr/internal/mods"
+	"mcmgr/internal/prompt"
 	"mcmgr/internal/ui"
 )
 
@@ -26,10 +27,12 @@ func modCmd() *Command {
 
 			grouped("Browse", modListCmd()),
 			grouped("Browse", modSearchCmd()),
+			grouped("Browse", modRecommendCmd()),
 			grouped("Browse", modInfoCmd()),
 		},
 		Examples: []string{
 			"mcmgr mod add fabric-api sodium lithium",
+			"mcmgr mod recommend",
 			"mcmgr mod list --outdated",
 			"mcmgr mod update --dry-run",
 			"mcmgr mod search shaders",
@@ -124,8 +127,20 @@ func modAddCmd() *Command {
 			AllowClientOnly: boolDefault(fs, "allow-client-only", clientOK, env.Cfg.Defaults.AllowClientOnly),
 		}
 		for _, query := range rest {
-			if err := env.Add(query, opts); err != nil {
-				return err
+			err := env.Add(query, opts)
+			if err != nil {
+				// No build for this version: offer to move the server to one
+				// the mod supports, and try again there.
+				moved, merr := offerVersionMove(env, err, opts.Channels, prompt.Interactive())
+				if merr != nil {
+					return merr
+				}
+				if !moved {
+					return err
+				}
+				if err := env.Add(query, opts); err != nil {
+					return err
+				}
 			}
 		}
 		ui.Ok("done; run 'mcmgr server restart' to load the changes")
@@ -407,9 +422,12 @@ func modSearchCmd() *Command {
 			for _, r := range results {
 				found++
 				marker := ""
-				if r.ClientOnly() {
+				switch {
+				case r.ClientOnly():
 					// Worth seeing before installing rather than after.
 					marker = ui.Yellow + "  client-only" + ui.Reset
+				case r.NeedsClient():
+					marker = ui.Yellow + "  needs every player to install it" + ui.Reset
 				}
 				fmt.Printf("  %s%-24s%s %s%s%s%s\n", ui.Bold, r.Slug, ui.Reset,
 					ui.Dim, downloadsLabel(r.Downloads), ui.Reset, marker)
@@ -424,6 +442,129 @@ func modSearchCmd() *Command {
 			return fmt.Errorf("nothing matching %q was found %s", query, scope)
 		}
 		fmt.Printf("\n%sinstall one with: mcmgr mod add <name>%s\n", ui.Dim, ui.Reset)
+		return nil
+	}
+	return cmd
+}
+
+func modRecommendCmd() *Command {
+	cmd := &Command{
+		Name:    "recommend",
+		Aliases: []string{"recommended", "rec"},
+		Short:   "Pick from a curated list of server-side mods or plugins",
+		Long: "Show a short, curated list of well-known server-side mods or plugins for this\n" +
+			"server's platform, and install the ones you tick. Every entry is marked by its\n" +
+			"author as running on servers; the pre-ticked ones change no gameplay.\n\n" +
+			"After the list, Modrinth can be searched for anything it does not cover.\n\n" +
+			"In a script, or with --list, the list is printed instead. --install installs\n" +
+			"the pre-ticked set without asking; add --all for the whole list.",
+		Examples: []string{
+			"mcmgr mod recommend",
+			"mcmgr mod recommend --list",
+			"mcmgr mod recommend --install            # the pre-ticked set, no prompt",
+			"mcmgr mod recommend --install --all",
+		},
+	}
+	var (
+		shared  modFlags
+		list    *bool
+		install *bool
+		all     *bool
+	)
+	cmd.Flags = func(fs *flag.FlagSet) {
+		shared = addSharedModFlags(fs, false)
+		list = fs.Bool("list", false, "print the list and exit without installing anything")
+		install = fs.Bool("install", false, "install the pre-selected entries without asking")
+		all = fs.Bool("all", false, "with --install, install every entry rather than the pre-selected ones")
+	}
+	cmd.Run = func(args []string) error {
+		fs, g := newFlags(cmd, "mcmgr mod recommend")
+		if _, err := parse(fs, g, args); err != nil {
+			return err
+		}
+		env, err := g.modEnv()
+		if err != nil {
+			return err
+		}
+		loader := env.Cfg.Loader
+		noun := loader.ContentNoun()
+		if !loader.SupportsMods() {
+			return fmt.Errorf("a %s server cannot load mods; nothing to recommend", loader)
+		}
+		recs := mods.Recommended(loader)
+		installed := func(slug string) bool { return env.Lock.Find(slug) != nil }
+
+		interactive := prompt.Interactive()
+		if *list || (!interactive && !*install) {
+			rows := [][]string{{"NAME", "WHAT IT DOES", "STATUS"}}
+			for _, r := range recs {
+				status := ""
+				switch {
+				case installed(r.Slug):
+					status = ui.Green + "installed" + ui.Reset
+				case r.Default:
+					status = ui.Dim + "pre-selected" + ui.Reset
+				}
+				rows = append(rows, []string{r.Slug, r.Why, status})
+			}
+			fmt.Print(ui.Table(rows))
+			fmt.Printf("\n%s%d recommended %s(s) for %s %s%s\n", ui.Dim, len(recs), noun, loader, env.Cfg.Minecraft, ui.Reset)
+			if !*list {
+				fmt.Printf("%sinstall the pre-selected ones with --install, or any of them with: mcmgr mod add <name>%s\n",
+					ui.Dim, ui.Reset)
+			}
+			return nil
+		}
+
+		var picks addonPicks
+		if *install {
+			set := mods.RecommendedDefaults(loader)
+			if *all {
+				set = recs
+			}
+			for _, slug := range recommendedSlugs(set) {
+				if !installed(slug) {
+					picks.add(slug)
+				}
+			}
+			if len(picks.slugs) == 0 {
+				ui.Info("every recommended %s is already installed", noun)
+				return nil
+			}
+		} else {
+			chosen, err := pickRecommended(loader, installed)
+			if err != nil {
+				return promptErr(err)
+			}
+			for _, slug := range chosen {
+				picks.add(slug)
+			}
+			filter := mods.FilterFor(env.Cfg, mods.ChannelsFrom(env.Cfg.Defaults))
+			if err := searchAndPick(filter, loader, &picks); err != nil {
+				return promptErr(err)
+			}
+			if len(picks.slugs) == 0 {
+				ui.Info("nothing chosen; nothing was changed")
+				return nil
+			}
+		}
+
+		// Guard before the first download rather than after, so a running
+		// server is refused up front instead of halfway through the list.
+		if err := env.Guard(*shared.force); err != nil {
+			return err
+		}
+		failed, err := installAddons(env.Cfg, picks.slugs, shared.channels.resolve(fs, env.Cfg), *shared.force, interactive)
+		if err != nil {
+			return err
+		}
+		if len(failed) == len(picks.slugs) {
+			return fmt.Errorf("none of the %d %s(s) could be installed; see above", len(failed), noun)
+		}
+		if len(failed) > 0 {
+			ui.Warn("%d of %d could not be installed: %s", len(failed), len(picks.slugs), strings.Join(failed, ", "))
+		}
+		ui.Ok("installed %d %s(s); run 'mcmgr server restart' to load them", len(picks.slugs)-len(failed), noun)
 		return nil
 	}
 	return cmd

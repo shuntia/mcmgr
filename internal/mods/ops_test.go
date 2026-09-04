@@ -232,3 +232,58 @@ func TestClientOnlyIsRefused(t *testing.T) {
 		t.Errorf("a provider with no side data should not block installs, got: %v", err)
 	}
 }
+
+// TestNoBuildErrorListsSupportedVersions covers the failure that used to be a
+// dead end: a mod with no build for the server's version now says which
+// versions it does support, and which one is the nearest move.
+func TestNoBuildErrorListsSupportedVersions(t *testing.T) {
+	env := newTestEnv(t) // fabric 1.21.4
+	proj := &Project{Provider: ProviderModrinth, ID: "P-x", Slug: "x", Name: "X"}
+	mk := func(id string, mc ...string) Version {
+		return Version{Provider: ProviderModrinth, ID: id, ProjectID: "P-x", Number: id,
+			Filename: id + ".jar", GameVersions: mc, Loaders: []string{"fabric"}}
+	}
+	useProvider(t, &fakeProvider{
+		projects: map[string]*Project{"P-x": proj, "x": proj},
+		byProject: map[string][]Version{"P-x": {
+			mk("v3", "1.21.5", "1.21.6"),
+			mk("v2", "1.21.1", "24w33a"),
+			mk("v1", "1.20.4"),
+		}},
+	})
+
+	err := env.Add("x", AddOptions{})
+	var nb *NoBuildError
+	if !errors.As(err, &nb) {
+		t.Fatalf("Add returned %v, want a *NoBuildError", err)
+	}
+	if !errors.Is(err, errNoCompatible) {
+		t.Error("a NoBuildError should still satisfy errors.Is(errNoCompatible)")
+	}
+	want := []string{"1.21.6", "1.21.5", "1.21.1", "1.20.4"}
+	if strings.Join(nb.Supported, " ") != strings.Join(want, " ") {
+		t.Errorf("Supported = %v, want %v (releases only, newest first)", nb.Supported, want)
+	}
+	newer, older := nb.Nearest()
+	if newer != "1.21.5" || older != "1.21.1" {
+		t.Errorf("Nearest = %q, %q; want 1.21.5, 1.21.1", newer, older)
+	}
+	if got := nb.Nearby(3); strings.Join(got, " ") != "1.20.4 1.21.1 1.21.5" {
+		t.Errorf("Nearby(3) = %v", got)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "mcmgr upgrade 1.21.5") {
+		t.Errorf("the error should name the nearest newer version to move to:\n%s", msg)
+	}
+
+	// With only older builds, the hint is still given but flagged as a
+	// downgrade, since a played world will not survive one.
+	useProvider(t, &fakeProvider{
+		projects:  map[string]*Project{"P-x": proj, "x": proj},
+		byProject: map[string][]Version{"P-x": {mk("v1", "1.20.4")}},
+	})
+	msg = env.Add("x", AddOptions{}).Error()
+	if !strings.Contains(msg, "mcmgr upgrade 1.20.4") || !strings.Contains(msg, "downgrade") {
+		t.Errorf("an older-only mod should suggest the downgrade and say it is one:\n%s", msg)
+	}
+}

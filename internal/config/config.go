@@ -114,10 +114,33 @@ type Java struct {
 	Path string `json:"path,omitempty" toml:"path,omitempty"`
 	// Args are JVM arguments placed before -jar.
 	Args []string `json:"args,omitempty" toml:"args,omitempty"`
+	// GC names the garbage collector: GCZGC, or empty for the JVM's default.
+	// Only the choice is recorded; the flags that make it happen are built at
+	// launch for the Java that actually runs (server.JVMArgs), since they
+	// differ by release and the Java can change under a server.
+	GC string `json:"gc,omitempty" toml:"gc,omitempty"`
 	// RequiredMajor is the Java feature release this Minecraft version needs,
 	// as published by Mojang. It is recorded when the server is installed or
 	// upgraded so the check before each launch needs no network.
 	RequiredMajor int `json:"required_major,omitempty" toml:"required_major,omitempty"`
+}
+
+// Garbage collectors a manifest can name.
+const (
+	GCDefault = ""    // whatever the JVM picks, G1 on every current release
+	GCZGC     = "zgc" // low-pause collector, recommended for Minecraft
+)
+
+// ParseGC normalises a collector name as typed: "default" and "" mean the
+// JVM default.
+func ParseGC(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "default":
+		return GCDefault, nil
+	case "zgc":
+		return GCZGC, nil
+	}
+	return "", fmt.Errorf("java.gc must be zgc or default, got %q", s)
 }
 
 // ModSpec is a wanted add-on as declared by the user. Version is "*" to track

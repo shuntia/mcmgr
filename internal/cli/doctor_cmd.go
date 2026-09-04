@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"mcmgr/internal/config"
+	"mcmgr/internal/java"
 	"mcmgr/internal/mods"
 	"mcmgr/internal/props"
 	"mcmgr/internal/server"
@@ -87,6 +88,7 @@ func runDoctor(g *globals) error {
 		okCheck("config", cfg.Path()),
 		checkLaunchTarget(cfg),
 		checkJava(cfg),
+		checkGC(cfg),
 		checkEULA(cfg),
 		checkManifestMatchesDisk(cfg),
 		checkPort(cfg, running),
@@ -148,6 +150,30 @@ func checkLaunchTarget(cfg *config.Config) checkLine {
 		return failCheck("server", problem(err), "run: mcmgr server install")
 	}
 	return okCheck("server", target)
+}
+
+// checkGC points out a server still on the JVM's default collector. Not a
+// failure: the server starts fine, it just pauses more than it needs to.
+func checkGC(cfg *config.Config) checkLine {
+	if java.SelectsGC(cfg.Java.Args) {
+		return okCheck("gc", "set in java.args")
+	}
+	status := server.CheckJava(cfg)
+	if !status.OK() {
+		// Java itself is the problem, and reported just above.
+		return okCheck("gc", "JVM default")
+	}
+	switch {
+	case cfg.Java.GC == config.GCZGC && !java.SupportsZGC(status.Info.Major):
+		return warnCheck("gc", fmt.Sprintf("zgc is set, but Java %d has no ZGC; the JVM default runs",
+			status.Info.Major), "run: mcmgr venv install")
+	case cfg.Java.GC == config.GCZGC:
+		return okCheck("gc", "ZGC")
+	case !java.SupportsZGC(status.Info.Major):
+		return okCheck("gc", "JVM default")
+	}
+	return warnCheck("gc", "JVM default; ZGC is recommended for Minecraft (shorter pauses)",
+		"run: mcmgr config set java.gc zgc")
 }
 
 func checkJava(cfg *config.Config) checkLine {

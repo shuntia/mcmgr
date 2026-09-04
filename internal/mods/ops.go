@@ -283,8 +283,11 @@ func (e *Env) selectVersion(prov Provider, proj *Project, pin string, f Filter) 
 	if err != nil {
 		switch {
 		case errors.Is(err, errNoCompatible):
-			return nil, fmt.Errorf("%s has no release for %s %s",
-				proj.Name, e.Cfg.Loader, e.Cfg.Minecraft)
+			return nil, &NoBuildError{
+				Name: proj.Name, Slug: proj.Slug,
+				Loader: string(e.Cfg.Loader), Minecraft: e.Cfg.Minecraft,
+				Supported: e.supportedReleases(prov, proj, f),
+			}
 		case errors.Is(err, errUnstableOnly):
 			// Name the exact channel and the setting that enables it, rather
 			// than a blanket "unstable".
@@ -302,6 +305,25 @@ func (e *Env) selectVersion(prov Provider, proj *Project, pin string, f Filter) 
 		return nil, fmt.Errorf("%s: %w", proj.Name, err)
 	}
 	return best, nil
+}
+
+// supportedReleases lists the Minecraft releases a project has builds for on
+// this loader, in the enabled channels. It is only consulted once an install
+// has already failed, so the extra request costs nothing on the happy path;
+// a failure here just leaves the list empty.
+func (e *Env) supportedReleases(prov Provider, proj *Project, f Filter) []string {
+	any := Filter{Loaders: f.Loaders, Channels: f.Channels}
+	versions, err := prov.Versions(proj.ID, any)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, v := range versions {
+		if f.Channels.Accepts(v.ReleaseType) {
+			ids = append(ids, v.GameVersions...)
+		}
+	}
+	return SortReleases(ids)
 }
 
 // install downloads a version into the content directory and records it in the

@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"mcmgr/internal/config"
+	"mcmgr/internal/java"
 	"mcmgr/internal/ui"
 )
 
@@ -328,9 +329,14 @@ func (s *supervisor) openLog() error {
 // Command builds the JVM invocation for a server. It is exported so
 // `server status` can show exactly what would run.
 func Command(cfg *config.Config, extraJava []string) *exec.Cmd {
-	args := make([]string, 0, len(cfg.Java.Args)+len(extraJava)+len(cfg.ServerArgs)+2)
-	args = append(args, cfg.Java.Args...)
-	args = append(args, extraJava...)
+	// The collector flags depend on the Java release, so ask the binary that
+	// is about to run. A Java that cannot be run at all fails loudly a moment
+	// later when the command starts; here it only means "release unknown".
+	major := 0
+	if info, err := java.Detect(cfg.JavaBin()); err == nil {
+		major = info.Major
+	}
+	args := JVMArgs(cfg, major, extraJava)
 	if len(cfg.LaunchArgs) > 0 {
 		// NeoForge and friends boot from a JVM argument file rather than a jar.
 		args = append(args, cfg.ExpandedLaunchArgs()...)

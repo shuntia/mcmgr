@@ -70,6 +70,8 @@ var manifestKeys = []Key{
 	{Name: "jar", Scope: Manifest, Kind: KindString, Help: "Server jar, relative to the server directory"},
 	{Name: "memory", Scope: Manifest, Kind: KindString, Help: "JVM heap size, e.g. 4G (maps to -Xmx)"},
 	{Name: "java.path", Scope: Manifest, Kind: KindString, Help: "Java binary; empty means java from PATH"},
+	{Name: "java.gc", Scope: Manifest, Kind: KindString, Choices: []string{"zgc", "default"},
+		Help: "Garbage collector: zgc (recommended, shorter pauses) or the JVM default"},
 	{Name: "java.args", Scope: Manifest, Kind: KindList, Help: "Extra JVM arguments"},
 	{Name: "java.required_major", Scope: Manifest, Kind: KindInt,
 		Help: "Java feature release this Minecraft version needs"},
@@ -126,6 +128,7 @@ var aliases = map[string]string{
 	"onlinemode":   "properties.online-mode",
 	"maxplayers":   "properties.max-players",
 	"java_args":    "java.args",
+	"gc":           "java.gc",
 	"xmx":          "memory",
 	"default":      "global.default_server",
 	"curseforge":   "global.curseforge_key",
@@ -338,6 +341,11 @@ func (s *Store) getManifest(name string) string {
 		return ""
 	case "java.path":
 		return c.Java.Path
+	case "java.gc":
+		if c.Java.GC == config.GCDefault {
+			return "default"
+		}
+		return c.Java.GC
 	case "java.args":
 		return strings.Join(c.Java.Args, " ")
 	case "java.required_major":
@@ -425,6 +433,9 @@ func (s *Store) Validate(k Key, value string) error {
 			if err != nil || n < 8 {
 				return fmt.Errorf("java.required_major must be a Java feature release such as 21, got %q", value)
 			}
+		case "java.gc":
+			_, err := config.ParseGC(value)
+			return err
 		case "name":
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("name cannot be empty")
@@ -525,6 +536,12 @@ func (s *Store) setManifest(name, value string) error {
 		c.Java.Args = setXmx(c.Java.Args, value)
 	case "java.path":
 		c.Java.Path = value
+	case "java.gc":
+		gc, err := config.ParseGC(value)
+		if err != nil {
+			return err
+		}
+		c.Java.GC = gc
 	case "java.args":
 		c.Java.Args = strings.Fields(value)
 	case "java.required_major":
