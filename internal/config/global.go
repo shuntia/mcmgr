@@ -32,6 +32,17 @@ type Global struct {
 	// JavaPath is the java binary used by servers that do not name their own.
 	// `mcmgr venv install --global` sets it.
 	JavaPath string `toml:"java_path,omitempty"`
+
+	// JavaDist is the distribution downloaded when one is needed and none is
+	// named: "temurin" (the default when empty) or "graalvm".
+	JavaDist string `toml:"java_distribution,omitempty"`
+}
+
+// refreshGlobalCache makes CachedGlobal reflect settings just written, so a
+// repair in the same process is seen by later JavaBin calls.
+func refreshGlobalCache(g *Global) {
+	CachedGlobal()
+	*globalValue = *g
 }
 
 // globalCache avoids re-reading the settings file for every JavaBin call.

@@ -205,12 +205,36 @@ mcmgr venv list            # runtimes already downloaded
 mcmgr venv remove 21
 ```
 
-Runtimes are Eclipse Temurin, unpacked into mcmgr's cache — **nothing is
-installed system-wide** and your existing Java is untouched. They are shared
-between servers, since a JRE is the same hundred megabytes for every server
-that wants it. `--global` changes the scope of the *setting*, not the download:
-without it the runtime is recorded for this server in `java.path`, with it as
-`global.java_path` for servers that name none.
+Runtimes are Eclipse Temurin unless you ask for GraalVM, and are unpacked into
+mcmgr's cache — **nothing is installed system-wide** and your existing Java is
+untouched. They are shared between servers, since a JRE is the same hundred
+megabytes for every server that wants it. `--global` changes the scope of the
+*setting*, not the download: without it the runtime is recorded for this
+server in `java.path`, with it as `global.java_path` for servers that name
+none.
+
+#### GraalVM
+
+Oracle GraalVM is the same JDK with the Graal JIT compiler in place of C2,
+which some servers run measurably faster on. It is free to use under Oracle's
+GraalVM Free Terms and Conditions, and published for Java 17 and newer only,
+which covers every Minecraft since 1.18.
+
+```bash
+mcmgr new smp --graalvm                              # download it during setup
+mcmgr venv install --graalvm                         # or for an existing server
+mcmgr config set global.java_distribution graalvm    # and whenever one is needed
+mcmgr venv list                                      # both kinds, side by side
+mcmgr venv remove graalvm-21
+```
+
+In a terminal, `mcmgr new` asks which Java the server should run on: the one
+already on the machine when it is new enough, Temurin, or GraalVM, with
+anything already downloaded marked as such. `--java-dist temurin` or
+`--graalvm` answers without a prompt, `--java <path>` names a JDK you have,
+and a script that passes neither gets the old behaviour: java from `PATH`, and
+an offer to download at the first launch if that turns out too old. That offer,
+like `mcmgr venv install` with no flag, follows `global.java_distribution`.
 
 If a server does fail anyway, mcmgr reads its log and says why:
 
@@ -548,12 +572,13 @@ mcmgr config set beta true            # bare names work: beta, alpha, provider, 
 mcmgr config set defaults.provider curseforge
 ```
 
-Two machine-wide ones pre-fill `mcmgr new`, for people who always reach for the
-same choices:
+Three machine-wide ones pre-fill `mcmgr new`, for people who always reach for
+the same choices:
 
 ```bash
 mcmgr config set global.default_loader fabric
 mcmgr config set global.default_memory 4G
+mcmgr config set global.java_distribution graalvm   # what 'venv install' downloads
 ```
 
 ### Release channels
@@ -608,7 +633,8 @@ loader. Navigate with the arrow keys, type to fill in text, press enter to
 accept.
 
 `mcmgr new` asks, in order: name, directory, platform, Minecraft version,
-memory, whether to run on ZGC (recommended, see [Garbage
+memory, which Java to run on (the one already installed, Temurin or GraalVM;
+see [Java](#java)), whether to run on ZGC (recommended, see [Garbage
 collector](#garbage-collector)), port, whitelist (on by default), online mode,
 the EULA, and then which recommended mods or plugins to install and whether to
 search for more. Passing `--recommended` or `--mod` answers the last of those
@@ -686,6 +712,17 @@ In order:
 1. `--server <name>`, naming a registered server or a path to one
 2. the nearest `mcmgr.toml` at or above the working directory
 3. the default server from the registry (`mcmgr server use <name>`)
+
+A server deleted by hand leaves its registration behind, and would otherwise
+make every command run outside a server directory fail on the same missing
+file. The registry repairs itself instead: the entry is forgotten, the default
+moves to another registered server, and a `global.java_path` whose binary went
+with the deleted directory is unset so the other servers can still start. The
+command that found the problem reports what was fixed and stops there, rather
+than quietly acting on whichever server became the default, so a `stop` meant
+for one server never lands on another. `mcmgr server forget` does the same
+tidying, and `mcmgr server list` marks a directory that no longer holds a
+server as `gone`.
 
 ## Files
 

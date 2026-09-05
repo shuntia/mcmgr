@@ -108,6 +108,9 @@ var globalKeys = []Key{
 		Help: "Heap size 'mcmgr new' offers first, e.g. 4G"},
 	{Name: "global.java_path", Scope: Global, Kind: KindString,
 		Help: "Java used by servers that do not set java.path"},
+	{Name: "global.java_distribution", Scope: Global, Kind: KindString,
+		Choices: []string{"temurin", "graalvm"},
+		Help:    "Java build downloaded when one is needed: temurin (default) or graalvm"},
 }
 
 func loaderChoices() []string {
@@ -133,6 +136,8 @@ var aliases = map[string]string{
 	"default":      "global.default_server",
 	"curseforge":   "global.curseforge_key",
 	"cf_key":       "global.curseforge_key",
+	"java_dist":    "global.java_distribution",
+	"distribution": "global.java_distribution",
 	"stop_timeout": "stop_timeout_secs",
 	"restart":      "restart_on_crash",
 	"autorestart":  "restart_on_crash",
@@ -314,6 +319,8 @@ func (s *Store) Get(k Key) string {
 			return s.Glob.DefaultMemory
 		case "global.java_path":
 			return s.Glob.JavaPath
+		case "global.java_distribution":
+			return s.Glob.JavaDist
 		}
 	}
 	return ""
@@ -506,6 +513,8 @@ func (s *Store) Set(k Key, value string) error {
 			s.Glob.DefaultMemory = value
 		case "global.java_path":
 			s.Glob.JavaPath = value
+		case "global.java_distribution":
+			s.Glob.JavaDist = strings.ToLower(strings.TrimSpace(value))
 		}
 	}
 	s.dirty[k.Scope] = true

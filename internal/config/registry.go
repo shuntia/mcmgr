@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,6 +66,10 @@ func (r *Registry) Save() error {
 	return WriteJSONLocked(p, r)
 }
 
+// errUnchanged is returned by a change function that found nothing to do, so
+// update adopts the fresh state without rewriting the file.
+var errUnchanged = errors.New("registry unchanged")
+
 // update applies change to a freshly read registry while holding its lock, and
 // adopts the result as the receiver's own state.
 //
@@ -82,6 +87,10 @@ func (r *Registry) update(change func(*Registry) error) error {
 			return err
 		}
 		if err := change(fresh); err != nil {
+			if errors.Is(err, errUnchanged) {
+				*r = *fresh
+				return nil
+			}
 			return err
 		}
 		if err := WriteJSON(p, fresh); err != nil {
@@ -169,7 +178,8 @@ func (r *Registry) Names() []string {
 }
 
 // Prune drops entries whose directories no longer contain a manifest, and
-// reports the names removed.
+// reports the names removed. A default naming a server that is not registered
+// is reseated too. The file is left alone when there is nothing to fix.
 func (r *Registry) Prune() ([]string, error) {
 	var gone []string
 	err := r.update(func(reg *Registry) error {
@@ -180,8 +190,12 @@ func (r *Registry) Prune() ([]string, error) {
 				delete(reg.Servers, name)
 			}
 		}
+		before := reg.Default
 		reg.reseatDefault()
 		sort.Strings(gone)
+		if len(gone) == 0 && reg.Default == before {
+			return errUnchanged
+		}
 		return nil
 	})
 	if err != nil {

@@ -226,6 +226,7 @@ func serverListCmd() *Command {
 		}
 
 		rows := [][]string{{"", "NAME", "STATE", "MINECRAFT", "LOADER", "DIRECTORY"}}
+		gone := 0
 		for _, name := range names {
 			dir := reg.Servers[name]
 			marker := " "
@@ -234,7 +235,10 @@ func serverListCmd() *Command {
 			}
 
 			state, mc, loader := "stopped", "?", "?"
-			if cfg, err := config.Load(dir); err != nil {
+			if !config.Exists(dir) {
+				state = "gone"
+				gone++
+			} else if cfg, err := config.Load(dir); err != nil {
 				state = "unreadable"
 			} else {
 				mc, loader = cfg.Minecraft, string(cfg.Loader)
@@ -253,6 +257,10 @@ func serverListCmd() *Command {
 		if reg.Default != "" {
 			fmt.Printf("\n%s* = default server%s\n", ui.Dim, ui.Reset)
 		}
+		if gone > 0 {
+			fmt.Printf("%s%s no longer holds a server; forget them with: mcmgr server list --prune%s\n",
+				ui.Dim, plural(gone, "directory"), ui.Reset)
+		}
 		return nil
 	}
 	return cmd
@@ -268,6 +276,8 @@ func colorState(state string) string {
 		return ui.Cyan + state + ui.Reset
 	case "unresponsive", "unreadable":
 		return ui.Yellow + state + ui.Reset
+	case "gone":
+		return ui.Red + state + ui.Reset
 	}
 	return state
 }
@@ -320,10 +330,28 @@ func serverForgetCmd() *Command {
 			return err
 		}
 		dir := reg.Servers[rest[0]]
+		before := reg.Default
 		if err := reg.Remove(rest[0]); err != nil {
 			return err
 		}
-		ui.Ok("forgot %s; its files remain in %s", rest[0], dir)
+		if config.Exists(dir) {
+			ui.Ok("forgot %s; its files remain in %s", rest[0], dir)
+		} else {
+			ui.Ok("forgot %s; %s no longer held a server", rest[0], dir)
+		}
+		if reg.Default != before {
+			if reg.Default != "" {
+				ui.Info("       the default server is now %s", reg.Default)
+			} else {
+				ui.Info("       no servers are registered now")
+			}
+		}
+		// Anything else machine-wide that leaned on that server.
+		if rep, rerr := config.Repair(); rerr == nil {
+			for _, line := range rep.Lines() {
+				ui.Info("       %s", line)
+			}
+		}
 		return nil
 	}
 	return cmd

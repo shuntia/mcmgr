@@ -162,6 +162,25 @@ func GetJSON(u string, out any, headers map[string]string) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// GetText fetches a small plain-text document, such as a published checksum.
+// The body is capped, since nothing this is used for is more than a line.
+func GetText(u string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(body)), nil
+}
+
 // PostJSON sends body as JSON to u and decodes the response into out.
 func PostJSON(u string, body, out any, headers map[string]string) error {
 	buf, err := json.Marshal(body)

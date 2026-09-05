@@ -35,6 +35,10 @@ type newFlagValues struct {
 	javaArgs   stringList
 	// zgc is tri-state like whitelist: "" asks, "true"/"false" decides.
 	zgc *string
+	// javaDist downloads a runtime for the server rather than relying on the
+	// Java already on the machine: "" asks, or leaves it to the first launch.
+	javaDist *string
+	graalvm  *bool
 	// recommended installs the pre-selected recommended add-ons; addons are
 	// extra ones named on the command line. Either given skips the prompt.
 	recommended *bool
@@ -57,6 +61,8 @@ func (v *newFlagValues) register(fs *flag.FlagSet) {
 	v.noInput = fs.Bool("no-input", false, "never prompt; fail if a required value is missing")
 	fs.Var(&v.javaArgs, "java-arg", "extra JVM argument; repeatable")
 	v.zgc = fs.String("zgc", "", "run on the ZGC garbage collector: true or false (default true)")
+	v.javaDist = fs.String("java-dist", "", "download a Java for this server: temurin or graalvm (default: ask, or java from PATH)")
+	v.graalvm = fs.Bool("graalvm", false, "download Oracle GraalVM for this server; the same as --java-dist graalvm")
 	v.recommended = fs.Bool("recommended", false,
 		"install the recommended server-side mods or plugins without asking")
 	fs.Var(&v.addons, "mod", "mod or plugin to install, as for 'mcmgr mod add'; repeatable")
@@ -75,6 +81,9 @@ func newCmd() *Command {
 			"Settings that can lock you out or damage a world are explained before they are\n" +
 			"applied. The whitelist is on unless --whitelist=false is given, and the JVM\n" +
 			"runs on ZGC unless --zgc=false is given or --java-arg names a collector.\n\n" +
+			"The server can run on the Java already installed, or on one downloaded for it:\n" +
+			"Eclipse Temurin, or Oracle GraalVM (--graalvm), whose Graal JIT compiler runs\n" +
+			"some servers measurably faster. Nothing is installed system-wide either way.\n\n" +
 			"On a platform that loads mods or plugins, a curated list of server-side ones\n" +
 			"is offered, and Modrinth can be searched for more; --recommended and --mod\n" +
 			"answer that without a prompt.",
@@ -83,6 +92,7 @@ func newCmd() *Command {
 			"mcmgr new survival --loader fabric          # ask only for the rest",
 			"mcmgr new lobby --loader paper --mc 1.21.4 --memory 4G --accept-eula --no-input",
 			"mcmgr new smp --loader fabric --recommended --mod chunky --no-input",
+			"mcmgr new smp --loader paper --graalvm     # download Oracle GraalVM for it",
 		},
 	}
 	cmd.Run = func(args []string) error { return runNew(cmd, "mcmgr new", args) }
@@ -210,6 +220,15 @@ func runNew(cmd *Command, path string, args []string) error {
 		}
 	}
 
+	// --- Java ---------------------------------------------------------------
+	// Which Java the server runs on: the one already here, or a download of
+	// Temurin or GraalVM. Asked now, while every other question is, rather
+	// than at the first launch when the Java on PATH turns out too old.
+	javaPick, err := chooseJava(&v, interactive, version)
+	if err != nil {
+		return err
+	}
+
 	// --- garbage collector -----------------------------------------------
 	// ZGC is recommended (see java.ZGCArgs for why). The offer depends on the
 	// Java that would run: ZGC is unknown to Java 8 and experimental before 15,
@@ -218,7 +237,7 @@ func runNew(cmd *Command, path string, args []string) error {
 	// question; --zgc=false skips it too.
 	gc := config.GCDefault
 	if !java.SelectsGC(v.javaArgs) {
-		useZGC, cerr := chooseZGC(v.zgc, interactive, *v.javaPath)
+		useZGC, cerr := chooseZGC(v.zgc, interactive, *v.javaPath, javaPick.downloadMajor())
 		if cerr != nil {
 			return cerr
 		}
@@ -328,6 +347,26 @@ func runNew(cmd *Command, path string, args []string) error {
 		return err
 	}
 
+	// Java comes before the server jar: the NeoForge installer needs a JVM
+	// to run, and the manifest is already there to retry from.
+	if javaPick.dist != "" {
+		rt := java.Runtime{Dist: javaPick.dist, Major: javaPick.major}
+		bin, jerr := java.Install(rt)
+		if jerr != nil {
+			return fmt.Errorf("%w\n\n       %s was created but has no Java or server binary yet.\n"+
+				"       Once the problem above is resolved, finish it with:\n"+
+				"         cd %s && mcmgr venv install --dist %s && mcmgr server install",
+				jerr, cfg.Dir(), dir, rt.Dist)
+		}
+		cfg.Java.Path = bin
+	}
+	if javaPick.major > 0 {
+		cfg.Java.RequiredMajor = javaPick.major
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+
 	if err := server.Install(cfg, server.InstallOptions{}); err != nil {
 		if loader == config.Quilt {
 			return err
@@ -381,6 +420,9 @@ func runNew(cmd *Command, path string, args []string) error {
 
 	ui.Ok("created %s in %s", name, cfg.Dir())
 	summariseNew(cfg, whitelist, onlineMode, port)
+	if javaPick.dist != "" {
+		field("java", "%s %d, downloaded", javaPick.dist.Label(), javaPick.major)
+	}
 	if gc == config.GCZGC {
 		field("gc", "ZGC")
 	}
@@ -444,18 +486,152 @@ func onOff(b bool) string {
 	return "off"
 }
 
+// javaChoice is the outcome of the Java step of `mcmgr new`: a runtime to
+// download, or none, in which case the server uses java from PATH (or the
+// global setting) and the first launch offers a download if that is too old.
+// major is the release Minecraft needs, when it was looked up.
+type javaChoice struct {
+	dist  java.Distribution
+	major int
+}
+
+// downloadMajor is the release about to be downloaded, or 0 when the server
+// will run on whatever Java is already here.
+func (c javaChoice) downloadMajor() int {
+	if c.dist == "" {
+		return 0
+	}
+	return c.major
+}
+
+// chooseJava decides which Java a new server runs on. --java names a binary
+// and settles it; --java-dist or --graalvm orders a download without asking;
+// otherwise, in a terminal, the choice is offered alongside whatever Java is
+// already installed, and in a script it is left to the first launch as
+// before.
+func chooseJava(v *newFlagValues, interactive bool, version string) (javaChoice, error) {
+	var choice javaChoice
+	want := *v.javaDist
+	if *v.graalvm {
+		if want != "" && !strings.EqualFold(want, string(java.GraalVM)) {
+			return choice, fmt.Errorf("--graalvm and --java-dist %s disagree", want)
+		}
+		want = string(java.GraalVM)
+	}
+	if *v.javaPath != "" {
+		if want != "" {
+			return choice, fmt.Errorf("--java names the Java to use, so there is nothing to download; drop --java-dist")
+		}
+		return choice, nil
+	}
+	if want == "" && !interactive {
+		return choice, nil
+	}
+
+	ui.Step("asking Mojang which Java Minecraft %s needs", version)
+	major, err := java.Required(version)
+	if err != nil {
+		if want != "" {
+			return choice, fmt.Errorf("%w\n       download one by release instead, e.g. 'mcmgr venv install 21 --dist %s'", err, want)
+		}
+		ui.Warn("%v; the first launch will check Java instead", err)
+		return choice, nil
+	}
+	choice.major = major
+
+	if want != "" {
+		dist, err := java.ParseDistribution(want)
+		if err != nil {
+			return choice, err
+		}
+		if !dist.Supports(major) {
+			return choice, fmt.Errorf("%s is only published for Java 17 and newer, but Minecraft %s needs Java %d\n"+
+				"       drop --java-dist to use Temurin", dist.Label(), version, major)
+		}
+		choice.dist = dist
+		return choice, nil
+	}
+
+	// What is already here, and is it enough?
+	current, derr := java.Detect((&config.Config{}).JavaBin())
+	usable := derr == nil && current.Major >= major
+	preferred := preferredDist()
+
+	var options []prompt.Option
+	def := ""
+	if usable {
+		options = append(options, prompt.Option{
+			Label: fmt.Sprintf("%-22s %s", fmt.Sprintf("Java %d, already here", current.Major), current.Path),
+			Value: "existing",
+		})
+		def = "existing"
+	}
+	for _, d := range java.Distributions {
+		if !d.Supports(major) {
+			continue
+		}
+		note := "download"
+		if _, ok := java.Find(java.Runtime{Dist: d, Major: major}); ok {
+			note = "already downloaded"
+		}
+		switch d {
+		case java.Temurin:
+			note += "; the usual choice"
+		case java.GraalVM:
+			note += "; Graal JIT compiler, faster for some servers"
+		}
+		options = append(options, prompt.Option{
+			Label: fmt.Sprintf("%-22s %s", fmt.Sprintf("%s %d", d.Label(), major), note),
+			Value: string(d),
+		})
+		if def == "" && d == preferred {
+			def = string(d)
+		}
+	}
+	if def == "" {
+		def = string(java.Temurin)
+	}
+
+	desc := fmt.Sprintf("Minecraft %s needs Java %d.", version, major)
+	if derr == nil && !usable {
+		desc += fmt.Sprintf(" The Java on this machine is %d, which is too old.", current.Major)
+	} else if derr != nil {
+		desc += " No Java was found on this machine."
+	}
+	desc += "\n\nA downloaded runtime is unpacked into mcmgr's cache and shared between\n" +
+		"servers; nothing is installed system-wide. Oracle GraalVM is free to use\n" +
+		"under the GraalVM Free Terms and Conditions."
+	pick, err := prompt.Select("Java runtime", desc, options, def)
+	if err != nil {
+		return choice, promptErr(err)
+	}
+	if pick == "existing" {
+		return choice, nil
+	}
+	choice.dist, err = java.ParseDistribution(pick)
+	return choice, err
+}
+
 // chooseZGC decides whether a new server runs on ZGC. Only the choice is
 // recorded; the flags are built at launch (server.JVMArgs) for whichever Java
 // runs then. javaPath is the --java flag; empty means the global setting or
-// java from PATH, as at launch.
+// java from PATH, as at launch. downloadMajor is the release about to be
+// downloaded for the server, when one is, which settles the question without
+// looking at the machine.
 //
 // When no Java can be found yet (it may be installed by `mcmgr venv` later),
 // the question is still asked. When the Java found is too old for ZGC, the
 // question is skipped, and an explicit --zgc=true is an error rather than a
 // choice that would silently do nothing.
-func chooseZGC(flagValue *string, interactive bool, javaPath string) (bool, error) {
-	bin := (&config.Config{Java: config.Java{Path: javaPath}}).JavaBin()
-	info, derr := java.Detect(bin)
+func chooseZGC(flagValue *string, interactive bool, javaPath string, downloadMajor int) (bool, error) {
+	var info java.Info
+	var derr error
+	if downloadMajor > 0 {
+		info = java.Info{Major: downloadMajor, Path: fmt.Sprintf("the Java %d being downloaded", downloadMajor)}
+	} else {
+		bin := (&config.Config{Java: config.Java{Path: javaPath}}).JavaBin()
+		info, derr = java.Detect(bin)
+	}
 	if derr == nil && !java.SupportsZGC(info.Major) {
 		if flagValue != nil && *flagValue != "" {
 			if b, perr := strconv.ParseBool(*flagValue); perr == nil && b {

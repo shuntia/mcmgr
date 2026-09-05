@@ -32,6 +32,9 @@ type Info struct {
 	Version string
 	// Runtime names the build, e.g. "Temurin-21.0.12+7".
 	Runtime string
+	// Dist is the distribution, when it is one mcmgr knows how to download;
+	// empty for any other build.
+	Dist Distribution
 }
 
 // String renders the version for display.
@@ -54,6 +57,13 @@ var versionPattern = regexp.MustCompile(`version "([^"]+)"`)
 // runtimePattern matches the build name on the second line.
 var runtimePattern = regexp.MustCompile(`Runtime Environment\s+\(?([^\s)(]+)`)
 
+// graalPattern matches the build name GraalVM prints there instead, which
+// has a space in it:
+//
+//	Java(TM) SE Runtime Environment Oracle GraalVM 21.0.4+8.1 (build ...)
+//	OpenJDK Runtime Environment GraalVM CE 21.0.2+13.1 (build ...)
+var graalPattern = regexp.MustCompile(`((?:Oracle )?GraalVM(?: CE)?\s+[^\s(]+)`)
+
 // Detect asks a Java binary what version it is.
 //
 // `java -version` writes to stderr, not stdout, which is why both are captured.
@@ -70,17 +80,26 @@ func Detect(bin string) (Info, error) {
 	if err != nil && len(out) == 0 {
 		return Info{}, fmt.Errorf("running %s -version: %w", resolved, err)
 	}
+	return parseVersionOutput(resolved, string(out))
+}
 
+// parseVersionOutput reads what `java -version` printed.
+func parseVersionOutput(resolved, text string) (Info, error) {
 	info := Info{Path: resolved}
-	text := string(out)
 	m := versionPattern.FindStringSubmatch(text)
 	if m == nil {
 		return info, fmt.Errorf("could not read a version from %s -version:\n%s", resolved, strings.TrimSpace(text))
 	}
 	info.Version = m[1]
 	info.Major = majorFromVersion(m[1])
-	if r := runtimePattern.FindStringSubmatch(text); r != nil {
+	if r := graalPattern.FindStringSubmatch(text); r != nil {
+		info.Runtime = r[1]
+		info.Dist = GraalVM
+	} else if r := runtimePattern.FindStringSubmatch(text); r != nil {
 		info.Runtime = strings.TrimSuffix(r[1], ",")
+		if strings.HasPrefix(info.Runtime, "Temurin") {
+			info.Dist = Temurin
+		}
 	}
 	if info.Major == 0 {
 		return info, fmt.Errorf("could not read a major version from %q", m[1])

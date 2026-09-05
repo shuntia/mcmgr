@@ -2,9 +2,11 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"mcmgr/internal/config"
 	"mcmgr/internal/java"
@@ -27,7 +29,11 @@ func venvCmd() *Command {
 			"Runtimes are downloaded once and shared between servers, since a JRE is the\n" +
 			"same hundred megabytes for every server that wants it. What --global changes\n" +
 			"is the scope of the setting: without it the runtime is recorded for this\n" +
-			"server, with it as the machine-wide default for servers that name none.",
+			"server, with it as the machine-wide default for servers that name none.\n\n" +
+			"Two distributions are offered: Eclipse Temurin, the default, and Oracle\n" +
+			"GraalVM, whose Graal JIT compiler runs some servers measurably faster. Set\n" +
+			"'mcmgr config set global.java_distribution graalvm' to download GraalVM\n" +
+			"whenever a runtime is needed.",
 		Sub: []*Command{
 			venvInstallCmd(),
 			venvUseCmd(),
@@ -38,6 +44,7 @@ func venvCmd() *Command {
 			"mcmgr venv                    # what Java does this server use?",
 			"mcmgr venv install            # fetch the version this server needs",
 			"mcmgr venv install 21 -g      # make Java 21 the machine-wide default",
+			"mcmgr venv install --graalvm  # the same release, as Oracle GraalVM",
 			"mcmgr venv use /opt/jdk21/bin/java",
 		},
 	}
@@ -121,8 +128,44 @@ func printInstalledRuntimes() {
 	fmt.Println()
 	fmt.Printf("%sDownloaded runtimes%s\n", ui.Bold, ui.Reset)
 	for _, r := range installed {
-		fmt.Printf("  Java %-3d %s%s%s\n", r.Major, ui.Dim, r.Path, ui.Reset)
+		fmt.Printf("  Java %-3d %-8s %s%s%s\n", r.Major, r.Dist, ui.Dim, r.Path, ui.Reset)
 	}
+}
+
+// distFlags declares the flags that choose a distribution, shared by the
+// commands that download one.
+type distFlags struct {
+	dist    *string
+	graalvm *bool
+}
+
+func (d *distFlags) register(fs *flag.FlagSet) {
+	d.dist = fs.String("dist", "", "Java distribution to download: temurin or graalvm (default: global.java_distribution, else temurin)")
+	d.graalvm = fs.Bool("graalvm", false, "download Oracle GraalVM; the same as --dist graalvm")
+}
+
+// resolve turns the flags into a distribution, falling back to the machine-wide
+// preference and then Temurin.
+func (d *distFlags) resolve() (java.Distribution, error) {
+	if *d.graalvm && *d.dist != "" && !strings.EqualFold(*d.dist, string(java.GraalVM)) {
+		return "", fmt.Errorf("--graalvm and --dist %s disagree", *d.dist)
+	}
+	if *d.graalvm {
+		return java.GraalVM, nil
+	}
+	if *d.dist != "" {
+		return java.ParseDistribution(*d.dist)
+	}
+	return preferredDist(), nil
+}
+
+// preferredDist is the distribution downloaded when nothing names one.
+func preferredDist() java.Distribution {
+	d, err := java.ParseDistribution(config.CachedGlobal().JavaDist)
+	if err != nil {
+		return java.Temurin
+	}
+	return d
 }
 
 func venvInstallCmd() *Command {
@@ -130,13 +173,17 @@ func venvInstallCmd() *Command {
 		Name:  "install",
 		Usage: "[java-version]",
 		Short: "Download a Java runtime and use it",
-		Long: "Download an Eclipse Temurin runtime and point this server at it.\n\n" +
+		Long: "Download a Java runtime and point this server at it.\n\n" +
 			"With no version, the one Mojang says this server's Minecraft version needs is\n" +
-			"used. Runtimes are shared between servers rather than copied per server.",
+			"used. Runtimes are shared between servers rather than copied per server.\n\n" +
+			"Eclipse Temurin is downloaded unless --graalvm or --dist says otherwise, or\n" +
+			"global.java_distribution is set. Oracle GraalVM is free to use under Oracle's\n" +
+			"GraalVM Free Terms and Conditions, and exists only for Java 17 and newer.",
 		Examples: []string{
 			"mcmgr venv install",
 			"mcmgr venv install 25",
 			"mcmgr venv install 21 --global",
+			"mcmgr venv install --graalvm",
 		},
 	}
 	cmd.Run = func(args []string) error {
@@ -144,12 +191,18 @@ func venvInstallCmd() *Command {
 		var (
 			global  = fs.Bool("global", false, "set as the machine-wide default instead of for this server")
 			globalS = fs.Bool("g", false, "shorthand for --global")
+			df      distFlags
 		)
+		df.register(fs)
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err
 		}
 		toGlobal := *global || *globalS
+		dist, err := df.resolve()
+		if err != nil {
+			return err
+		}
 
 		var cfg *config.Config
 		if !toGlobal || len(rest) == 0 {
@@ -166,7 +219,7 @@ func venvInstallCmd() *Command {
 			return err
 		}
 
-		bin, err := java.Install(major)
+		bin, err := java.Install(java.Runtime{Dist: dist, Major: major})
 		if err != nil {
 			return err
 		}
@@ -298,11 +351,13 @@ func venvListCmd() *Command {
 			ui.Info("       install one with 'mcmgr venv install'")
 			return nil
 		}
-		rows := [][]string{{"JAVA", "VERSION", "PATH"}}
+		rows := [][]string{{"RUNTIME", "JAVA", "DISTRIBUTION", "VERSION", "PATH"}}
 		for _, r := range installed {
-			rows = append(rows, []string{strconv.Itoa(r.Major), r.String(), r.Path})
+			name := java.Runtime{Dist: r.Dist, Major: r.Major}.String()
+			rows = append(rows, []string{name, strconv.Itoa(r.Major), r.Dist.Label(), r.String(), r.Path})
 		}
 		fmt.Print(ui.Table(rows))
+		fmt.Printf("\n%sremove one with: mcmgr venv remove <runtime>%s\n", ui.Dim, ui.Reset)
 		return nil
 	}
 	return cmd
@@ -312,40 +367,55 @@ func venvRemoveCmd() *Command {
 	cmd := &Command{
 		Name:    "remove",
 		Aliases: []string{"rm"},
-		Usage:   "<java-version>",
+		Usage:   "<runtime>",
 		Short:   "Delete a downloaded Java runtime",
+		Long: "Delete a runtime 'mcmgr venv install' downloaded. Name it as 'mcmgr venv list'\n" +
+			"shows it: a bare number is Temurin, and GraalVM is 'graalvm-<version>'.",
+		Examples: []string{
+			"mcmgr venv remove 21",
+			"mcmgr venv remove graalvm-21",
+		},
 	}
 	cmd.Run = func(args []string) error {
 		fs, g := newFlags(cmd, "mcmgr venv remove")
+		var df distFlags
+		df.register(fs)
 		rest, err := parse(fs, g, args)
 		if err != nil {
 			return err
 		}
-		if err := requireArgs(rest, 1, "mcmgr venv remove", "<java-version>"); err != nil {
+		if err := requireArgs(rest, 1, "mcmgr venv remove", "<runtime>"); err != nil {
 			return err
 		}
-		major, err := strconv.Atoi(rest[0])
+		rt, err := java.ParseRuntime(rest[0])
 		if err != nil {
-			return fmt.Errorf("expected a Java feature release such as 21, got %q", rest[0])
+			return err
 		}
+		// A distribution flag applies to a bare number.
+		if *df.graalvm || *df.dist != "" {
+			if rt.Dist, err = df.resolve(); err != nil {
+				return err
+			}
+		}
+		label := fmt.Sprintf("%s %d", rt.Dist.Label(), rt.Major)
 
 		// Refuse to delete a runtime something still points at.
-		bin, _ := java.Find(major)
+		bin, _ := java.Find(rt)
 		if bin != "" {
 			if glob := config.CachedGlobal(); glob.JavaPath == bin {
-				return fmt.Errorf("Java %d is the machine-wide default\n"+
-					"       change it first with 'mcmgr venv use <path> --global'", major)
+				return fmt.Errorf("%s is the machine-wide default\n"+
+					"       change it first with 'mcmgr venv use <path> --global'", label)
 			}
 			if cfg, cerr := g.config(); cerr == nil && cfg.Java.Path == bin {
-				return fmt.Errorf("%s uses Java %d\n"+
-					"       change it first with 'mcmgr venv install <other>'", cfg.Name, major)
+				return fmt.Errorf("%s uses %s\n"+
+					"       change it first with 'mcmgr venv install <other>'", cfg.Name, label)
 			}
 		}
 
-		if err := java.Remove(major); err != nil {
+		if err := java.Remove(rt); err != nil {
 			return err
 		}
-		ui.Ok("removed Java %d", major)
+		ui.Ok("removed %s", label)
 		return nil
 	}
 	return cmd
@@ -364,16 +434,24 @@ func ensureJava(cfg *config.Config, allowPrompt bool) error {
 	}
 
 	status := server.CheckJava(cfg)
+	if status.Missing && cfg.Java.Path == "" {
+		// A global java_path whose runtime was deleted along with the server
+		// that installed it would stop this one too; unset it and look again.
+		if rep, rerr := config.Repair(); rerr == nil && rep.JavaPathCleared != "" {
+			ui.Warn("%s", strings.Join(rep.Lines(), "\n       "))
+			status = server.CheckJava(cfg)
+		}
+	}
 	if status.OK() {
 		return nil
 	}
 
 	// Already downloaded, just not selected: use it without asking.
 	if status.TooOld() || status.Missing {
-		if bin, ok := java.Find(status.Required); ok && status.Required > 0 {
+		if bin, rt, ok := java.FindAny(status.Required, preferredDist()); ok && status.Required > 0 {
 			cfg.Java.Path = bin
 			if err := cfg.Save(); err == nil {
-				ui.Info("switching %s to the Java %d runtime already downloaded", cfg.Name, status.Required)
+				ui.Info("switching %s to the %s %d runtime already downloaded", cfg.Name, rt.Dist.Label(), rt.Major)
 				return nil
 			}
 		}
@@ -384,13 +462,17 @@ func ensureJava(cfg *config.Config, allowPrompt bool) error {
 		return fmt.Errorf("%s", problem)
 	}
 
+	dist := preferredDist()
+	if !dist.Supports(status.Required) {
+		dist = java.Temurin
+	}
 	ui.Warn("%s", problem)
 	ok, err := prompt.Confirm(
 		fmt.Sprintf("Download Java %d now?", status.Required),
 		fmt.Sprintf("Minecraft %s needs Java %d.\n\n"+
-			"mcmgr can fetch an Eclipse Temurin runtime and use it for this server.\n"+
+			"mcmgr can fetch an %s runtime and use it for this server.\n"+
 			"Nothing is installed system-wide: it is unpacked into mcmgr's cache and\n"+
-			"used only by servers you point at it.", cfg.Minecraft, status.Required),
+			"used only by servers you point at it.", cfg.Minecraft, status.Required, dist.Label()),
 		true)
 	if err != nil {
 		return promptErr(err)
@@ -399,7 +481,7 @@ func ensureJava(cfg *config.Config, allowPrompt bool) error {
 		return fmt.Errorf("cannot start without Java %d", status.Required)
 	}
 
-	bin, err := java.Install(status.Required)
+	bin, err := java.Install(java.Runtime{Dist: dist, Major: status.Required})
 	if err != nil {
 		return err
 	}

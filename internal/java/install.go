@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 
 	"mcmgr/internal/httpx"
@@ -59,8 +58,8 @@ func platform() (osName, arch string, err error) {
 
 // StoreDir is where downloaded runtimes live. They are shared between servers:
 // a JRE is a hundred megabytes and identical for every server that needs the
-// same release, so one copy per major version is kept rather than one per
-// server.
+// same release, so one copy per distribution and major version is kept rather
+// than one per server.
 func StoreDir() (string, error) {
 	base, err := paths.CacheDir()
 	if err != nil {
@@ -69,13 +68,13 @@ func StoreDir() (string, error) {
 	return filepath.Join(base, "java"), nil
 }
 
-// dirFor is where a given major version is installed.
-func dirFor(major int) (string, error) {
+// dirFor is where a given runtime is installed.
+func dirFor(r Runtime) (string, error) {
 	store, err := StoreDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(store, strconv.Itoa(major)), nil
+	return filepath.Join(store, r.dirName()), nil
 }
 
 // BinaryName is the java executable's file name on this platform.
@@ -87,8 +86,8 @@ func BinaryName() string {
 }
 
 // Find returns the java binary of an already-installed managed runtime.
-func Find(major int) (string, bool) {
-	dir, err := dirFor(major)
+func Find(r Runtime) (string, bool) {
+	dir, err := dirFor(r)
 	if err != nil {
 		return "", false
 	}
@@ -99,7 +98,25 @@ func Find(major int) (string, bool) {
 	return "", false
 }
 
-// Installed lists the managed runtimes, newest major first.
+// FindAny returns a managed runtime of the given release, trying the
+// distributions in the order given, so a caller can prefer one without
+// refusing another that is already downloaded.
+func FindAny(major int, prefer ...Distribution) (string, Runtime, bool) {
+	order := append([]Distribution{}, prefer...)
+	for _, d := range Distributions {
+		order = append(order, d)
+	}
+	for _, d := range order {
+		r := Runtime{Dist: d, Major: major}
+		if bin, ok := Find(r); ok {
+			return bin, r, true
+		}
+	}
+	return "", Runtime{}, false
+}
+
+// Installed lists the managed runtimes, newest major first, Temurin before
+// GraalVM within a release.
 func Installed() []Info {
 	store, err := StoreDir()
 	if err != nil {
@@ -115,78 +132,89 @@ func Installed() []Info {
 		if !e.IsDir() {
 			continue
 		}
-		major, err := strconv.Atoi(e.Name())
-		if err != nil {
+		r, ok := runtimeFromDir(e.Name())
+		if !ok {
 			continue
 		}
-		bin, ok := Find(major)
+		bin, ok := Find(r)
 		if !ok {
 			continue
 		}
 		info, derr := Detect(bin)
 		if derr != nil {
-			info = Info{Path: bin, Major: major}
+			info = Info{Path: bin, Major: r.Major}
 		}
+		// The directory says what was downloaded; -version output is only a
+		// guess at it.
+		info.Dist = r.Dist
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Major > out[j].Major })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Major != out[j].Major {
+			return out[i].Major > out[j].Major
+		}
+		return distRank(out[i].Dist) < distRank(out[j].Dist)
+	})
 	return out
 }
 
+func distRank(d Distribution) int {
+	for i, known := range Distributions {
+		if known == d {
+			return i
+		}
+	}
+	return len(Distributions)
+}
+
 // Remove deletes a managed runtime.
-func Remove(major int) error {
-	dir, err := dirFor(major)
+func Remove(r Runtime) error {
+	dir, err := dirFor(r)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("no managed Java %d is installed", major)
+		return fmt.Errorf("no managed %s %d is installed", r.Dist.Label(), r.Major)
 	}
 	return os.RemoveAll(dir)
 }
 
-// Install downloads a Temurin runtime for the given feature release and returns
-// the path to its java binary. An already-installed runtime is reused.
-func Install(major int) (string, error) {
-	if bin, ok := Find(major); ok {
-		ui.Info("  Java %d is already installed", major)
+// download is one archive to fetch: where from, what to call it, its digest
+// when the publisher states one, and its size when known (0 otherwise).
+type download struct {
+	url, name, sum string
+	size           int64
+	release        string
+}
+
+// Install downloads a runtime and returns the path to its java binary. An
+// already-installed runtime is reused.
+func Install(r Runtime) (string, error) {
+	if r.Dist == "" {
+		r.Dist = Temurin
+	}
+	if bin, ok := Find(r); ok {
+		ui.Info("  %s %d is already installed", r.Dist.Label(), r.Major)
 		return bin, nil
 	}
+	if !r.Dist.Supports(r.Major) {
+		return "", fmt.Errorf("%s is only published for Java %d and newer, and this needs Java %d\n"+
+			"       use Temurin instead: mcmgr venv install %d", r.Dist.Label(), graalMinMajor, r.Major, r.Major)
+	}
 
-	osName, arch, err := platform()
+	var dl download
+	var err error
+	switch r.Dist {
+	case GraalVM:
+		dl, err = graalArchive(r.Major)
+	default:
+		dl, err = temurinArchive(r.Major)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	// A JRE is enough to run a server and is roughly half the size; fall back
-	// to the full JDK for releases that ship no JRE.
-	var chosen *asset
-	for _, image := range []string{"jre", "jdk"} {
-		u := fmt.Sprintf("%s/assets/latest/%d/hotspot?architecture=%s&image_type=%s&os=%s&vendor=eclipse",
-			adoptiumAPI, major, arch, image, osName)
-
-		var assets []asset
-		if err := httpx.GetJSON(u, &assets, nil); err != nil {
-			return "", fmt.Errorf("asking Adoptium for a Java %d build: %w", major, err)
-		}
-		for i := range assets {
-			// Take the archive, never the .msi or .pkg installer: mcmgr
-			// unpacks a runtime beside its own files rather than installing
-			// anything system-wide.
-			if isArchive(assets[i].Binary.Package.Name) {
-				chosen = &assets[i]
-				break
-			}
-		}
-		if chosen != nil {
-			break
-		}
-	}
-	if chosen == nil {
-		return "", fmt.Errorf("Adoptium has no Java %d build for %s/%s", major, osName, arch)
-	}
-
-	dir, err := dirFor(major)
+	dir, err := dirFor(r)
 	if err != nil {
 		return "", err
 	}
@@ -198,39 +226,97 @@ func Install(major int) (string, error) {
 		return "", err
 	}
 
-	pkg := chosen.Binary.Package
-	archive := filepath.Join(store, pkg.Name)
-	ui.Step("downloading %s (%s)", chosen.ReleaseName, ui.Bytes(pkg.Size))
-	if err := httpx.Download(pkg.Link, archive, pkg.Checksum); err != nil {
-		return "", fmt.Errorf("downloading Java %d: %w", major, err)
+	archive := filepath.Join(store, dl.name)
+	if dl.size > 0 {
+		ui.Step("downloading %s (%s)", dl.release, ui.Bytes(dl.size))
+	} else {
+		ui.Step("downloading %s", dl.release)
+	}
+	if err := httpx.Download(dl.url, archive, dl.sum); err != nil {
+		return "", fmt.Errorf("downloading %s %d: %w", r.Dist.Label(), r.Major, err)
 	}
 	defer os.Remove(archive)
 
-	ui.Step("unpacking Java %d", major)
-	staging := filepath.Join(store, ".unpack-"+strconv.Itoa(major))
+	ui.Step("unpacking %s %d", r.Dist.Label(), r.Major)
+	staging := filepath.Join(store, ".unpack-"+r.dirName())
 	_ = os.RemoveAll(staging)
 	defer os.RemoveAll(staging)
 
 	if err := extract(archive, staging); err != nil {
-		return "", fmt.Errorf("unpacking Java %d: %w", major, err)
+		return "", fmt.Errorf("unpacking %s %d: %w", r.Dist.Label(), r.Major, err)
 	}
 
-	// Temurin archives contain a single top-level directory; move that into
-	// place so the layout is <store>/<major>/bin/java.
+	// The archives contain a single top-level directory; move that into place
+	// so the layout is <store>/<runtime>/bin/java.
 	root, err := findJavaHome(staging)
 	if err != nil {
 		return "", err
 	}
 	_ = os.RemoveAll(dir)
 	if err := os.Rename(root, dir); err != nil {
-		return "", fmt.Errorf("installing Java %d: %w", major, err)
+		return "", fmt.Errorf("installing %s %d: %w", r.Dist.Label(), r.Major, err)
 	}
 
 	bin := filepath.Join(dir, "bin", BinaryName())
 	if _, err := os.Stat(bin); err != nil {
-		return "", fmt.Errorf("unpacked Java %d but found no %s", major, bin)
+		return "", fmt.Errorf("unpacked %s %d but found no %s", r.Dist.Label(), r.Major, bin)
 	}
 	return bin, nil
+}
+
+// temurinArchive asks Adoptium for the current Temurin build of a release.
+func temurinArchive(major int) (download, error) {
+	osName, arch, err := platform()
+	if err != nil {
+		return download{}, err
+	}
+
+	// A JRE is enough to run a server and is roughly half the size; fall back
+	// to the full JDK for releases that ship no JRE.
+	for _, image := range []string{"jre", "jdk"} {
+		u := fmt.Sprintf("%s/assets/latest/%d/hotspot?architecture=%s&image_type=%s&os=%s&vendor=eclipse",
+			adoptiumAPI, major, arch, image, osName)
+
+		var assets []asset
+		if err := httpx.GetJSON(u, &assets, nil); err != nil {
+			return download{}, fmt.Errorf("asking Adoptium for a Java %d build: %w", major, err)
+		}
+		for _, a := range assets {
+			// Take the archive, never the .msi or .pkg installer: mcmgr
+			// unpacks a runtime beside its own files rather than installing
+			// anything system-wide.
+			if isArchive(a.Binary.Package.Name) {
+				pkg := a.Binary.Package
+				return download{url: pkg.Link, name: pkg.Name, sum: pkg.Checksum,
+					size: pkg.Size, release: a.ReleaseName}, nil
+			}
+		}
+	}
+	return download{}, fmt.Errorf("Adoptium has no Java %d build for %s/%s", major, osName, arch)
+}
+
+// graalArchive locates Oracle's current GraalVM build of a release, and its
+// published sha256.
+func graalArchive(major int) (download, error) {
+	u, name, err := graalDownload(major)
+	if err != nil {
+		return download{}, err
+	}
+	sum, err := httpx.GetText(u + ".sha256")
+	if err != nil {
+		if httpx.NotFound(err) {
+			return download{}, fmt.Errorf("Oracle publishes no GraalVM %d build for %s/%s", major, runtime.GOOS, runtime.GOARCH)
+		}
+		return download{}, fmt.Errorf("asking Oracle for the GraalVM %d checksum: %w", major, err)
+	}
+	// The file is the bare hex digest, occasionally followed by the file
+	// name in the coreutils style.
+	sum = strings.Fields(sum)[0]
+	if len(sum) != 64 {
+		return download{}, fmt.Errorf("unexpected GraalVM %d checksum %q", major, sum)
+	}
+	return download{url: u, name: name, sum: sum,
+		release: fmt.Sprintf("Oracle GraalVM for JDK %d", major)}, nil
 }
 
 func isArchive(name string) bool {

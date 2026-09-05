@@ -193,7 +193,11 @@ func checkJava(cfg *config.Config) checkLine {
 		return warnCheck("java", fmt.Sprintf("Java %d; no requirement recorded for Minecraft %s",
 			status.Info.Major, cfg.Minecraft), "run: mcmgr server install")
 	}
-	return okCheck("java", fmt.Sprintf("Java %d at %s", status.Info.Major, status.Info.Path))
+	build := ""
+	if status.Info.Runtime != "" {
+		build = " (" + status.Info.Runtime + ")"
+	}
+	return okCheck("java", fmt.Sprintf("Java %d%s at %s", status.Info.Major, build, status.Info.Path))
 }
 
 func checkEULA(cfg *config.Config) checkLine {

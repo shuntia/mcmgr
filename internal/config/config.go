@@ -421,6 +421,12 @@ func Resolve(sel string) (*Config, error) {
 			return nil, err
 		}
 		if dir, ok := reg.Servers[sel]; ok {
+			if !Exists(dir) {
+				// The server was deleted from under its registration. Tidy
+				// the registry rather than failing the same way every time.
+				return nil, fmt.Errorf("server %q was registered at %s, which no longer holds a server%s",
+					sel, dir, repairNote())
+			}
 			c, err := Load(dir)
 			if err != nil {
 				return nil, fmt.Errorf("server %q is registered at %s but could not be loaded: %w", sel, dir, err)
@@ -437,7 +443,21 @@ func Resolve(sel string) (*Config, error) {
 	reg, err := LoadRegistry()
 	if err == nil && reg.Default != "" {
 		if dir, ok := reg.Servers[reg.Default]; ok {
-			return Load(dir)
+			if Exists(dir) {
+				return Load(dir)
+			}
+			// Repair, but do not quietly act on whichever server became the
+			// default instead: the user asked for the old one, and would
+			// not want its stop or upgrade landing on another.
+			return nil, fmt.Errorf("%w: the default server %q was registered at %s, which no longer holds a server%s\n"+
+				"       re-run this from a server directory, or pass --server <name>",
+				ErrNoServer, reg.Default, dir, repairNote())
+		}
+		// A default naming an unregistered server, from a hand edit.
+		if note := repairNote(); note != "" {
+			return nil, fmt.Errorf("%w: the default server %q is not registered%s\n"+
+				"       re-run this from a server directory, or pass --server <name>",
+				ErrNoServer, reg.Default, note)
 		}
 	}
 	return nil, fmt.Errorf("%w: run this from a server directory, pass --server <name>, or create one with 'mcmgr server create'", ErrNoServer)
