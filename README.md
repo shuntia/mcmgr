@@ -749,6 +749,7 @@ jar = "fabric-server-launch.jar"
 server_args = ["nogui"]
 stop_timeout_secs = 90
 restart_on_crash = false
+idle_stop = false
 
 [java]
 args = ["-Xmx4G"]
@@ -847,6 +848,56 @@ full allowance back, so a server that falls over after a week still gets its
 restarts. `mcmgr server status` shows the policy, and how many restarts the
 current run has already used.
 
+### Stopping when nobody is on
+
+A server nobody is playing on still holds its memory and burns CPU ticking
+empty chunks. With `idle_stop` on, mcmgr sits in front of it, stops it once
+it has been empty for a while, and starts it again the moment a player
+connects:
+
+```bash
+mcmgr config set idle_stop true
+mcmgr config set idle_timeout_secs 600     # default 300
+mcmgr restart
+```
+
+The supervisor takes the address in `server.properties` (`server-ip` and
+`server-port`) for itself and runs the JVM on a private port behind it, passed
+as `--port`, so `server.properties` keeps naming the port players use. Every
+connection goes through mcmgr:
+
+- **A player joining a sleeping server** starts it and waits on the "Joining
+  world" screen until it is ready, then is let in. A server that takes longer
+  than 25 seconds tells them to try again in a moment, since clients give up
+  on a silent server at about thirty.
+- **The server list** keeps showing a sleeping server, with its last real
+  version and icon, nobody online, and a line under the MOTD saying a join
+  will start it.
+- **Once it is up**, everything is passed straight through, encrypted and
+  compressed as usual; mcmgr only counts connections.
+
+The server is stopped with its own `stop` command, like any other stop, once
+nobody has been connected through mcmgr for `idle_timeout_secs`, and only
+after asking the server itself, so a Bedrock player on Geyser keeps it up too.
+The supervisor stays running, so `server stop` still shuts everything down,
+`mcmgr start` wakes a sleeping server by hand, and `server status` and
+`server list` show it as `asleep`. A JVM that exits for any other reason, say
+a `stop` typed in the console, or a crash that `restart_on_crash` gave up on,
+also goes to sleep until the next player.
+
+Things to know:
+
+- The server sees every player as connecting from `127.0.0.1`, so IP bans
+  and per-IP logs stop meaning anything. `prevent-proxy-connections` must stay
+  off, or logins fail; the console warns if it is on.
+- Paper is told to listen on loopback only. Other servers bind the private
+  port on `server-ip`, all interfaces if that is empty, so keep it firewalled
+  like any other port you do not publish.
+- Mods and plugins stay locked while the server sleeps, since a player can
+  wake it at any moment. Stop it to change them.
+- The protocol handling comes from
+  [go-mc](https://github.com/Tnze/go-mc).
+
 ## Environment variables
 
 | Variable | Effect |
@@ -879,13 +930,15 @@ current run has already used.
 
 ## Dependencies
 
-Two direct dependencies, both for things worth not hand-rolling:
+Three direct dependencies, all for things worth not hand-rolling:
 
 - `github.com/BurntSushi/toml` — full-spec TOML, so a hand-edited `mcmgr.toml`
   parses the way the user expects
 - `github.com/charmbracelet/huh` — the prompts, including raw terminal handling
   across Windows consoles and Unix terminals (this pulls in bubbletea and
   lipgloss, which is most of the binary size)
+- `github.com/Tnze/go-mc` — the Minecraft protocol, for the handshakes and
+  server-list pings `idle_stop` reads and answers
 
 Everything else — HTTP, JSON, process supervision, the control protocol — is
 the standard library. Startup stays around 35 ms because none of the prompt

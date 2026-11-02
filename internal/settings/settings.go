@@ -81,6 +81,10 @@ var manifestKeys = []Key{
 		Help: "Start the server again when it exits unexpectedly"},
 	{Name: "restart_max_retries", Scope: Manifest, Kind: KindInt,
 		Help: "Consecutive crash restarts before giving up; -1 for no limit"},
+	{Name: "idle_stop", Scope: Manifest, Kind: KindBool,
+		Help: "Stop the server when nobody is on it, and start it when a player connects"},
+	{Name: "idle_timeout_secs", Scope: Manifest, Kind: KindInt,
+		Help: "Seconds the server may sit empty before idle_stop stops it"},
 
 	// Defaults for command options, so the flags you always pass can be set
 	// once. Each is still overridable per command.
@@ -142,6 +146,10 @@ var aliases = map[string]string{
 	"restart":      "restart_on_crash",
 	"autorestart":  "restart_on_crash",
 	"auto_restart": "restart_on_crash",
+	"idle":         "idle_stop",
+	"autostop":     "idle_stop",
+	"auto_stop":    "idle_stop",
+	"idle_timeout": "idle_timeout_secs",
 
 	// The [defaults] table is what people reach for most, so its keys answer
 	// to their bare names too.
@@ -373,6 +381,10 @@ func (s *Store) getManifest(name string) string {
 		// Show the limit actually in force, not the empty value standing for
 		// it, since the whole point is knowing when mcmgr gives up.
 		return strconv.Itoa(c.RestartRetries())
+	case "idle_stop":
+		return strconv.FormatBool(c.IdleStop)
+	case "idle_timeout_secs":
+		return strconv.Itoa(c.IdleTimeoutSecs())
 	case "defaults.provider":
 		return c.Defaults.Provider
 	case "defaults.allow_beta":
@@ -587,6 +599,21 @@ func (s *Store) setManifest(name, value string) error {
 			return err
 		}
 		c.RestartMaxRetries = n
+	case "idle_stop":
+		return assignBool(value, &c.IdleStop)
+	case "idle_timeout_secs":
+		if value == "" {
+			c.IdleTimeout = 0
+			return nil
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("idle_timeout_secs must be a positive number of seconds")
+		}
+		c.IdleTimeout = n
 	case "defaults.provider":
 		c.Defaults.Provider = value
 	case "defaults.allow_beta":

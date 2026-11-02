@@ -18,6 +18,7 @@ const (
 	OpStop   = "stop"   // graceful shutdown, then force after the grace period
 	OpKill   = "kill"   // immediate termination
 	OpAttach = "attach" // stream console output until the client disconnects
+	OpWake   = "wake"   // start a server idle_stop has put to sleep
 )
 
 // Response types.
@@ -66,6 +67,15 @@ type Status struct {
 	// Restarts counts how many times restart_on_crash has brought this
 	// server back since it last ran long enough to look healthy.
 	Restarts int `json:"restarts,omitempty"`
+	// Asleep is true while idle_stop has the JVM stopped, waiting for a
+	// player to connect.
+	Asleep bool `json:"asleep,omitempty"`
+	// Listen is where players connect under idle_stop, ServerPort the
+	// private port the JVM is on while it runs, and Players how many are
+	// connected through mcmgr.
+	Listen     string `json:"listen,omitempty"`
+	ServerPort int    `json:"server_port,omitempty"`
+	Players    int    `json:"players,omitempty"`
 }
 
 // Conn is a client connection to a supervisor.

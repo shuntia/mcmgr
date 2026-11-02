@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mcmgr/internal/config"
 	"mcmgr/internal/prompt"
@@ -246,6 +247,8 @@ func serverListCmd() *Command {
 					state = "running"
 					if !live.Responsive {
 						state = "unresponsive"
+					} else if live.Status != nil && live.Status.Asleep {
+						state = "asleep"
 					} else if live.Status != nil && !live.Status.Ready {
 						state = "starting"
 					}
@@ -274,6 +277,8 @@ func colorState(state string) string {
 		return ui.Green + state + ui.Reset
 	case "starting":
 		return ui.Cyan + state + ui.Reset
+	case "asleep":
+		return ui.Dim + state + ui.Reset
 	case "unresponsive", "unreadable":
 		return ui.Yellow + state + ui.Reset
 	case "gone":
@@ -688,6 +693,8 @@ func serverStatusCmd() *Command {
 				state = ui.Yellow + "running (unresponsive)" + ui.Reset
 			case live.Status != nil && live.Status.Stopping:
 				state = ui.Yellow + "stopping" + ui.Reset
+			case live.Status != nil && live.Status.Asleep:
+				state = ui.Dim + "asleep (starts when a player connects)" + ui.Reset
 			case live.Status != nil && !live.Status.Ready:
 				state = ui.Cyan + "starting" + ui.Reset
 			default:
@@ -727,8 +734,23 @@ func serverStatusCmd() *Command {
 			field("on crash", "restart (%s)", limit)
 		}
 
+		if cfg.IdleStop {
+			field("idle stop", "after %s with nobody on", ui.Duration(time.Duration(cfg.IdleTimeoutSecs())*time.Second))
+		}
+
 		if live != nil {
-			field("pid", "%d (jvm %d)", live.State.PID, live.State.ChildPID)
+			if st := live.Status; st != nil && st.Listen != "" {
+				if st.ServerPort > 0 {
+					field("players", "%d connected via %s %s(server on port %d)%s", st.Players, st.Listen, ui.Dim, st.ServerPort, ui.Reset)
+				} else {
+					field("players", "none; listening on %s", st.Listen)
+				}
+			}
+			if live.State.ChildPID > 0 {
+				field("pid", "%d (jvm %d)", live.State.PID, live.State.ChildPID)
+			} else {
+				field("pid", "%d (no jvm)", live.State.PID)
+			}
 			field("uptime", "%s", ui.Duration(live.State.Uptime()))
 			field("port", "%d %s(mcmgr control)%s", live.State.Port, ui.Dim, ui.Reset)
 			if live.Status != nil && live.Status.Restarts > 0 {

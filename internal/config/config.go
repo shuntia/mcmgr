@@ -207,6 +207,14 @@ type Config struct {
 	// start at all is not restarted forever. Negative means no limit.
 	RestartMaxRetries int `json:"restart_max_retries,omitempty" toml:"restart_max_retries,omitempty"`
 
+	// IdleStop puts mcmgr in front of the server: the supervisor holds the
+	// server's port itself, stops the JVM once nobody has been connected for
+	// IdleTimeout, and starts it again when a player connects.
+	IdleStop bool `json:"idle_stop,omitempty" toml:"idle_stop,omitempty"`
+	// IdleTimeout is how many seconds the server may sit empty before it is
+	// stopped. Zero means DefaultIdleTimeout.
+	IdleTimeout int `json:"idle_timeout_secs,omitempty" toml:"idle_timeout_secs,omitempty"`
+
 	Java Java `json:"java" toml:"java"`
 	// Defaults are the command options this server always wants, so they do
 	// not have to be typed on every invocation.
@@ -279,6 +287,19 @@ func (c *Config) RestartRetries() int {
 		return c.RestartMaxRetries
 	}
 	return DefaultRestartRetries
+}
+
+// DefaultIdleTimeout is how long an empty server keeps running under
+// idle_stop: long enough that a player reconnecting after a crash or a quick
+// break finds it still up.
+const DefaultIdleTimeout = 300
+
+// IdleTimeoutSecs is the idle period in force.
+func (c *Config) IdleTimeoutSecs() int {
+	if c.IdleTimeout > 0 {
+		return c.IdleTimeout
+	}
+	return DefaultIdleTimeout
 }
 
 // FindMod returns the index of a spec by id or name, or -1.

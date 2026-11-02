@@ -26,6 +26,13 @@ func Launch(cfg *config.Config, opts Options) (*State, error) {
 	if live, err := Probe(cfg.Dir()); err != nil {
 		return nil, err
 	} else if live != nil {
+		if live.Status != nil && live.Status.Asleep {
+			// idle_stop has it asleep; starting it means waking it.
+			if _, err := Do(live.State, Request{Op: OpWake}); err != nil {
+				return nil, err
+			}
+			return live.State, nil
+		}
 		return nil, fmt.Errorf("server %q is already running (pid %d)", cfg.Name, live.State.PID)
 	}
 	if err := preflight(cfg); err != nil {
@@ -328,6 +335,11 @@ func SendCommand(live *Live, command string) error {
 		}
 		conn.SetDeadline(time.Now().Add(budget))
 		resp, err := conn.Recv()
+		if resp != nil && resp.Type == RespErr {
+			// The supervisor refused the command, say because the server
+			// is asleep; that is worth more than silence.
+			return err
+		}
 		if err != nil {
 			return nil // quiet period elapsed, or the connection ended
 		}

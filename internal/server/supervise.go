@@ -150,6 +150,20 @@ type supervisor struct {
 	stopping atomic.Bool
 	exited   chan struct{}
 	exitCode atomic.Int32
+	finished sync.Once
+
+	// alive is true while a JVM process exists, and runDone is closed when
+	// the current one has exited and its exit has been dealt with.
+	alive   atomic.Bool
+	runDone chan struct{}
+
+	// idle is the player-facing proxy when idle_stop is on, nil otherwise.
+	// runMu orders the moves between running, dozing (an idle stop on its
+	// way) and asleep (no JVM until a player connects).
+	idle   *idleProxy
+	runMu  sync.Mutex
+	dozing atomic.Bool
+	asleep atomic.Bool
 }
 
 // Options control how a server is started.
@@ -212,6 +226,17 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 		Dir:        cfg.Dir(),
 	}
 
+	if cfg.IdleStop {
+		// Bound before the JVM starts, for the same reason as the control
+		// port, and because the JVM must not take the players' port itself.
+		p, err := newIdleProxy(s)
+		if err != nil {
+			return 1, err
+		}
+		s.idle = p
+		defer p.ln.Close()
+	}
+
 	if err := s.start(opts.ExtraJavaArgs); err != nil {
 		return 1, err
 	}
@@ -226,6 +251,12 @@ func Supervise(cfg *config.Config, opts Options) (int, error) {
 	defer ClearState(cfg.Dir())
 
 	go s.acceptLoop()
+	if s.idle != nil {
+		s.emit(fmt.Sprintf("[mcmgr] idle_stop: players connect through %s; the server stops after %s with nobody on",
+			s.idle.addr(), ui.Duration(s.idle.timeout)))
+		go s.idle.serve()
+		go s.idleLoop()
+	}
 	// Whatever signals this process, the server is only ever asked to stop
 	// through its console; see installSignalHandler.
 	defer s.installSignalHandler()()
@@ -356,6 +387,13 @@ func Command(cfg *config.Config, extraJava []string) *exec.Cmd {
 // start launches the JVM and begins pumping its output into the hub.
 func (s *supervisor) start(extraJava []string) error {
 	cmd := Command(s.cfg, extraJava)
+	if s.idle != nil {
+		args, err := s.idle.serverArgs()
+		if err != nil {
+			return err
+		}
+		cmd.Args = append(cmd.Args, args...)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -374,9 +412,17 @@ func (s *supervisor) start(extraJava []string) error {
 		return fmt.Errorf("starting %s: %w", s.cfg.JavaBin(), err)
 	}
 
+	done := make(chan struct{})
 	s.cmdMu.Lock()
 	s.cmd = cmd
+	s.runDone = done
 	s.cmdMu.Unlock()
+	s.alive.Store(true)
+	if s.idle != nil {
+		// Starting counts as activity, so a server woken by a player who
+		// then gives up is not stopped the moment it is ready.
+		s.idle.touch()
+	}
 	s.stdinMu.Lock()
 	s.stdin = stdin
 	s.stdinMu.Unlock()
@@ -391,9 +437,11 @@ func (s *supervisor) start(extraJava []string) error {
 	go func() { defer wg.Done(); s.pump(stderr) }()
 
 	go func() {
+		defer close(done)
 		// The pipes must be fully drained before Wait, which closes them.
 		wg.Wait()
 		err := cmd.Wait()
+		s.alive.Store(false)
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
@@ -406,11 +454,30 @@ func (s *supervisor) start(extraJava []string) error {
 			// from here on.
 			return
 		}
+		if s.sleepAfterExit(code) {
+			// idle_stop keeps the supervisor up for the next player.
+			return
+		}
 		s.emit(fmt.Sprintf("[mcmgr] server exited with code %d", code))
-		close(s.exited)
-		s.hub.close()
+		s.finish()
 	}()
 	return nil
+}
+
+// finish ends the supervisor: Supervise returns and attached clients are told
+// the server exited. It is idempotent.
+func (s *supervisor) finish() {
+	s.finished.Do(func() {
+		close(s.exited)
+		s.hub.close()
+	})
+}
+
+// currentRun returns the channel closed once the current JVM has exited.
+func (s *supervisor) currentRun() chan struct{} {
+	s.cmdMu.Lock()
+	defer s.cmdMu.Unlock()
+	return s.runDone
 }
 
 // process returns the JVM currently being supervised, which changes whenever a
@@ -457,7 +524,7 @@ func restartBackoff(attempt int) time.Duration {
 // and `server kill` all set stopping first, and a zero exit code is the server
 // doing as it was told.
 func (s *supervisor) shouldRestart(code int, ranFor time.Duration) (time.Duration, bool) {
-	if !s.cfg.RestartOnCrash || code == 0 || s.stopping.Load() {
+	if !s.cfg.RestartOnCrash || code == 0 || s.stopping.Load() || s.dozing.Load() {
 		return 0, false
 	}
 
@@ -554,6 +621,9 @@ func (s *supervisor) writeConsole(line string) error {
 	s.stdinMu.Lock()
 	defer s.stdinMu.Unlock()
 	if s.stdin == nil {
+		if s.asleep.Load() {
+			return errAsleep
+		}
 		return fmt.Errorf("server stdin is closed")
 	}
 	_, err := io.WriteString(s.stdin, line+"\n")
@@ -569,6 +639,9 @@ func (s *supervisor) requestStop(timeoutSecs int) {
 	// Wakes a restart that is waiting out its backoff, so a stop is never
 	// followed by the server coming back.
 	close(s.stopWanted)
+	if s.finishIfAsleep() {
+		return
+	}
 	if timeoutSecs <= 0 {
 		timeoutSecs = s.cfg.StopTimeoutSecs()
 	}
@@ -597,6 +670,9 @@ func (s *supervisor) requestKill() {
 	if s.stopping.CompareAndSwap(false, true) {
 		close(s.stopWanted)
 	}
+	if s.finishIfAsleep() {
+		return
+	}
 	s.emit("[mcmgr] killing server process")
 	s.kill()
 }
@@ -613,7 +689,7 @@ func (s *supervisor) wait() int {
 func (s *supervisor) status() *Status {
 	s.stMu.Lock()
 	defer s.stMu.Unlock()
-	return &Status{
+	st := &Status{
 		Name:      s.cfg.Name,
 		Dir:       s.cfg.Dir(),
 		Minecraft: s.cfg.Minecraft,
@@ -625,7 +701,16 @@ func (s *supervisor) status() *Status {
 		Ready:     s.ready.Load(),
 		Stopping:  s.stopping.Load(),
 		Restarts:  int(s.restarts.Load()),
+		Asleep:    s.asleep.Load(),
 	}
+	if s.idle != nil {
+		st.Listen = s.idle.addr()
+		st.Players = int(s.idle.active.Load())
+		if s.alive.Load() {
+			st.ServerPort = int(s.idle.backend.Load())
+		}
+	}
+	return st
 }
 
 // acceptLoop serves control connections until the listener closes.
@@ -705,6 +790,17 @@ func (s *supervisor) handle(conn net.Conn) {
 			s.requestStop(req.Timeout)
 			_ = send(Response{Type: RespOK, Msg: "stopping"})
 
+		case OpWake:
+			if s.idle == nil {
+				_ = send(Response{Type: RespErr, Msg: "idle_stop is off; the server is already running"})
+				continue
+			}
+			if err := s.wake(); err != nil {
+				_ = send(Response{Type: RespErr, Msg: err.Error()})
+				continue
+			}
+			_ = send(Response{Type: RespOK, Msg: "waking"})
+
 		case OpKill:
 			s.requestKill()
 			_ = send(Response{Type: RespOK, Msg: "killed"})
@@ -769,7 +865,11 @@ func (s *supervisor) forwardTerminalInput() {
 		line = strings.TrimRight(line, "\r\n")
 		if line != "" {
 			if werr := s.writeConsole(line); werr != nil {
-				return
+				if !errors.Is(werr, errAsleep) {
+					return
+				}
+				// Asleep is temporary; keep the console for when it wakes.
+				fmt.Fprintf(os.Stderr, "[mcmgr] %v\n", werr)
 			}
 		}
 		if err != nil {
